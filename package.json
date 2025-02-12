@@ -1,0 +1,51 @@
+{
+  "name": "rossa",
+  "version": "0.0.1",
+  "description": "yve",
+  "author": "Marky <markjotep@gmail.com>",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "util": "cp -r ../misc/util ./",
+    "dirs": "for dir in ./src ./dist ./test ./util ./types; do mkdir -p $dir; done",
+    "@": "ln -sf ../../misc/@/ ./src",
+    "ts": "ln -sf ../misc/tsconfig.json ./;",
+    "init": "bun run dirs && bun run util && bun run @ && bun run ts;",
+    "build": "rm -r ./types ; tsc && bun build ./src/index.ts --outdir ./dist --minify --packages external --target bun && rollup -c ./util/rollup.config.js"
+  },
+  "keywords": [
+    "ts",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MARKjotep/rossa.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MARKjotep/rossa/issues"
+  },
+  "homepage": "https://github.com/MARKjotep/rossa#readme",
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "authored": "^0.0.3",
+    "dotenv": "^16.4.7",
+    "rollup": "^4.34.6",
+    "rollup-plugin-dts": "^6.1.1",
+    "yra": "link:yra"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.8",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.7.2"
+  },
+  "type": "module"
+}
