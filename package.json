@@ -1,7 +1,7 @@
 {
   "name": "rossa",
   "version": "0.0.1",
-  "description": "yve",
+  "description": "Rossa bun JS framework",
   "author": "Marky <markjotep@gmail.com>",
   "license": "MIT",
   "main": "dist/index.js",
@@ -37,8 +37,7 @@
     "authored": "^0.0.3",
     "dotenv": "^16.4.7",
     "rollup": "^4.34.6",
-    "rollup-plugin-dts": "^6.1.1",
-    "yra": "link:yra"
+    "rollup-plugin-dts": "^6.1.1"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.8",
