@@ -141,6 +141,10 @@ declare class Formula {
     _statics?: obj<Response>;
     statics: (statics?: obj<Response>) => void;
     constructor(dir?: string, options?: yveOptions);
+    /** --------------------
+     * string | int | float | file | uuid
+     * - /url/\<string:hell>
+     */
     route(path: string): <T extends typeof response>(f?: T | undefined) => T | undefined;
     wss(path: string, config?: wssConfig): <T extends typeof websocket>(f?: T | undefined) => T | undefined;
     error(...codes: number[]): <T extends typeof response>(f?: T) => T | undefined;

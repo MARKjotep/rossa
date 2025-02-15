@@ -1,7 +1,7 @@
 {
   "name": "rossa",
   "version": "0.0.1",
-  "description": "Rossa bun JS framework",
+  "description": "Rossa Bun JS framework",
   "author": "Marky <markjotep@gmail.com>",
   "license": "MIT",
   "main": "dist/index.js",
@@ -34,7 +34,7 @@
   "homepage": "https://github.com/MARKjotep/rossa#readme",
   "dependencies": {
     "jsonwebtoken": "^9.0.2",
-    "authored": "^0.0.3",
+    "authored": "latest",
     "dotenv": "^16.4.7",
     "rollup": "^4.34.6",
     "rollup-plugin-dts": "^6.1.1"
