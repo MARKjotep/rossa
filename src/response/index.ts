@@ -24,12 +24,15 @@ export class response extends ResponseSession implements response {
   [key: string]: any;
   status?: number;
   stream?: eStream;
+  path: string;
   private headers: obj<string> = {};
   constructor(
     public request: request,
     public args: Record<string, string> = {},
   ) {
     super();
+
+    this.path = request.path;
   }
   get?(): Promise<any> | any;
   post?(): Promise<any> | any;

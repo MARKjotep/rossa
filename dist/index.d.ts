@@ -84,6 +84,7 @@ declare class response extends ResponseSession implements response {
     [key: string]: any;
     status?: number;
     stream?: eStream;
+    path: string;
     private headers;
     constructor(request: request, args?: Record<string, string>);
     get?(): Promise<any> | any;
