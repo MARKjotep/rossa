@@ -1,6 +1,6 @@
 {
   "name": "rossa",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Rossa Bun JS framework",
   "author": "Marky <markjotep@gmail.com>",
   "license": "MIT",
@@ -35,13 +35,13 @@
   "dependencies": {
     "jsonwebtoken": "^9.0.2",
     "authored": "latest",
-    "dotenv": "^16.4.7",
-    "rollup": "^4.34.8",
-    "rollup-plugin-dts": "^6.1.1"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.9",
-    "@types/bun": "1.2.2"
+    "@types/bun": "1.2.2",
+    "rollup": "^4.34.8",
+    "rollup-plugin-dts": "^6.1.1"
   },
   "peerDependencies": {
     "typescript": "^5.7.2"
