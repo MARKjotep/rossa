@@ -1,7 +1,6 @@
 import { ServerSide, Auth } from 'authored';
 import * as bun from 'bun';
-import { Server, ServerWebSocket, Serve, WebSocketHandler, BunPlugin } from 'bun';
-import { WatchEventType } from 'node:fs';
+import { Server, ServerWebSocket, Serve, WebSocketHandler } from 'bun';
 
 type obj<T> = Record<string, T>;
 
@@ -176,34 +175,6 @@ declare class Rossa extends Formula {
     constructor(options?: yveOptions);
 }
 
-declare class Builder {
-    dir: string;
-    out: string;
-    files: string[];
-    external: string[];
-    drop: string[];
-    target: string;
-    define: Record<string, any>;
-    exclude: string[];
-    hashAsset: boolean;
-    plugins: BunPlugin[];
-    private clearing?;
-    constructor({ files, target, define, hashAsset, external, drop, plugins, }: {
-        files: string[];
-        target?: "browser" | "bun";
-        define?: Record<string, any>;
-        hashAsset?: boolean;
-        external?: string[];
-        drop?: string[];
-        plugins?: BunPlugin[];
-    });
-    clear(c?: {
-        exclude: string[];
-    }): this;
-    build(): this;
-    watch(fn?: (event: WatchEventType, filename: string | null) => void): void;
-}
-
 declare class Render<T> {
     type: "yra" | "jwt";
     render: T;
@@ -212,4 +183,4 @@ declare class Render<T> {
     static jwt(jwtSession: any): Promise<Render<ServerSide>>;
 }
 
-export { $$, Builder, Render, Rossa, auths, response, websocket };
+export { $$, Render, Rossa, auths, response, websocket };
