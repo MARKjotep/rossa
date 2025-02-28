@@ -1,4 +1,11 @@
-import { readdirSync, rmSync, statSync, unlinkSync, watch } from "node:fs";
+import {
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  watch,
+  WatchEventType,
+} from "node:fs";
 import path from "node:path";
 import { isDir } from "../@/bun";
 import { $$, isFN, ngify, oFItems, oItems, oLen } from "../@";
@@ -122,7 +129,7 @@ export class Builder {
 
     return this;
   }
-  watch(fn?: (event: any, filename: any) => void) {
+  watch(fn?: (event: WatchEventType, filename: string | null) => void) {
     const watcher = watch(
       this.dir,
       { recursive: true },
@@ -134,9 +141,8 @@ export class Builder {
           } catch (e) {
             console.error(e);
           }
-
-          fn?.(event, filename);
         }
+        fn?.(event, filename);
       },
     );
 

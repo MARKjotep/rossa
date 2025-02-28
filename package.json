@@ -36,12 +36,12 @@
     "jsonwebtoken": "^9.0.2",
     "authored": "latest",
     "dotenv": "^16.4.7",
-    "rollup": "^4.34.6",
+    "rollup": "^4.34.8",
     "rollup-plugin-dts": "^6.1.1"
   },
   "devDependencies": {
-    "@types/jsonwebtoken": "^9.0.8",
-    "@types/bun": "latest"
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/bun": "1.2.2"
   },
   "peerDependencies": {
     "typescript": "^5.7.2"

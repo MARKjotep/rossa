@@ -24,7 +24,7 @@ export class Rossa extends Formula {
   serve: _server;
   constructor(options: yveOptions = {}) {
     super(".", options);
-    const { envPath, appDir, session } = options;
+    const { envPath, session } = options;
     const PRIV = this.dir + "/.private";
 
     initEnv(PRIV, envPath);

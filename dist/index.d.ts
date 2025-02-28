@@ -1,6 +1,7 @@
 import { ServerSide, Auth } from 'authored';
 import * as bun from 'bun';
 import { Server, ServerWebSocket, Serve, WebSocketHandler, BunPlugin } from 'bun';
+import { WatchEventType } from 'node:fs';
 
 type obj<T> = Record<string, T>;
 
@@ -200,7 +201,7 @@ declare class Builder {
         exclude: string[];
     }): this;
     build(): this;
-    watch(fn?: (event: any, filename: any) => void): void;
+    watch(fn?: (event: WatchEventType, filename: string | null) => void): void;
 }
 
 declare class Render<T> {

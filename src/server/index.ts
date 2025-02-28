@@ -29,7 +29,9 @@ export async function ServerCall(this: Rossa, options: serverOptions) {
     ...server,
     ...(this._statics && { static: this._statics }),
     port: server.port || 3000,
+
     tls: getTLS(this.dir),
+
     fetch: async (req, server) => {
       //
       return await new Runner(req, server, this.apt).response();
