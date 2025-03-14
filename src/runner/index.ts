@@ -1,7 +1,7 @@
 import { BunFile, deflateSync, gzipSync, Server } from "bun";
 import { request } from "../request";
 import { UPGRADE } from "../wss";
-import { $$, obj, oItems } from "../@";
+import { $$, addBASE, obj, oItems } from "../@";
 import { PATH, ERROR } from "../response";
 
 export type responseBody =
@@ -55,14 +55,15 @@ export class Runner extends Pres {
     req: Request,
     server?: Server,
     public dir: string = "./",
+    public base: string = "",
   ) {
     super();
     this.request = new request(req, server);
   }
-
   async response() {
     const { path, isWSS } = this.request;
-    this.path = path;
+
+    this.path = this._base(path);
 
     let ctx = await (isWSS ? UPGRADE : PATH).call(this);
 
@@ -71,5 +72,8 @@ export class Runner extends Pres {
     }
 
     return new Response(ctx, this.init);
+  }
+  protected _base(str: string) {
+    return addBASE(this.base, str);
   }
 }

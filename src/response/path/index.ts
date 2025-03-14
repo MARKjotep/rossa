@@ -9,7 +9,7 @@ import { $$, oAss } from "../../@";
 export async function PATH(this: Runner): Promise<responseBody> {
   const { serverPath, args, session } = await getPath.call(this, "path");
 
-  if (!serverPath) return this.request.isFile ? FILE.call(this) : null;
+  if (!serverPath) return this.request.isFile ? await FILE.call(this) : null;
 
   const { serverClass } = serverPath;
 
@@ -22,7 +22,7 @@ export async function PATH(this: Runner): Promise<responseBody> {
   const { isEventStream, method } = this.request;
 
   if (isEventStream && F?.eventStream) {
-    return ESTREAM.call(this, F, args, F.eventStream);
+    return await ESTREAM.call(this, F, args, F.eventStream);
   }
 
   if (method === "options") {
@@ -33,6 +33,7 @@ export async function PATH(this: Runner): Promise<responseBody> {
   if (F?.[method]) {
     const ctx = await F[method]();
     this.status = 200;
+
     return this.compress("deflate", (await CTX.call(this, F, ctx)) ?? "");
   }
 

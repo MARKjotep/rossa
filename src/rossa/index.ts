@@ -8,10 +8,11 @@ import { Serve, WebSocketHandler } from "bun";
 import { $$, obj } from "../@";
 
 export interface yveOptions {
-  dir?: string;
+  root?: string;
   appDir?: string;
   envPath?: string;
   session?: Auth;
+  base?: string;
 }
 
 type _server = (
@@ -20,7 +21,7 @@ type _server = (
 ) => void;
 
 export class Rossa extends Formula {
-  index: (server?: dev) => void;
+  html: (server?: dev & { name?: string }) => Promise<void>;
   serve: _server;
   constructor(options: yveOptions = {}) {
     super(".", options);
@@ -38,12 +39,13 @@ export class Rossa extends Formula {
     S.init(SH);
     // what if Session is included in the app instead??
 
-    this.index = async (server: dev = {}) => {
-      server.path = server.path || "/";
-      await createIndex(server, this.apt);
+    this.html = async (server: dev & { name?: string } = {}) => {
+      server.path = this._base(server.path || "/");
+
+      const nm = await createIndex(server, this.apt, this.base);
 
       const dt = new Date().toLocaleTimeString();
-      $$.p = `index @ ${dt}`;
+      $$.p = `${nm}.html @ ${dt}`;
     };
 
     this.serve = async (

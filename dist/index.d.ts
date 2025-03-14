@@ -135,24 +135,31 @@ interface wssConfig {
     requireSession?: boolean;
 }
 
-declare class Formula {
-    dir: string;
-    apt: string;
+declare class routeCFG {
     files: (...file: ([string, pathConfig] | string)[]) => void;
-    _statics?: obj<Response>;
     statics: (statics?: obj<Response>) => void;
-    constructor(dir?: string, options?: yveOptions);
     /** --------------------
      * string | int | float | file | uuid
      * - /url/\<string:hell>
      */
-    route(path: string): <T extends typeof response>(f?: T | undefined) => T | undefined;
-    wss(path: string, config?: wssConfig): <T extends typeof websocket>(f?: T | undefined) => T | undefined;
-    error(...codes: number[]): <T extends typeof response>(f?: T) => T | undefined;
-    folders(...folder: ([string, {
-        requireSession?: boolean;
-    }] | string)[]): void;
-    redirect(url: string, headers?: obj<string>): Response;
+    route: (path: string) => <T extends typeof response>(f?: T | undefined) => T | undefined;
+    wss: (path: string, config: wssConfig) => <T extends typeof websocket>(f?: T | undefined) => T | undefined;
+    error: (...codes: number[]) => <T extends typeof response>(f?: T | undefined) => T | undefined;
+    folders: (...folder: ([
+        string,
+        {
+            requireSession?: boolean;
+        }
+    ] | string)[]) => void;
+    redirect: (url: string, headers?: obj<string>) => Response;
+}
+declare class Formula extends routeCFG {
+    dir: string;
+    apt: string;
+    base: string;
+    _statics?: obj<Response>;
+    constructor(dir?: string, options?: yveOptions);
+    protected _base(str: string): string;
 }
 
 interface dev {
@@ -163,14 +170,17 @@ interface dev {
 }
 
 interface yveOptions {
-    dir?: string;
+    root?: string;
     appDir?: string;
     envPath?: string;
     session?: Auth;
+    base?: string;
 }
 type _server = (server?: Partial<Serve> & dev, wss?: Partial<WebSocketHandler>) => void;
 declare class Rossa extends Formula {
-    index: (server?: dev) => void;
+    html: (server?: dev & {
+        name?: string;
+    }) => Promise<void>;
     serve: _server;
     constructor(options?: yveOptions);
 }

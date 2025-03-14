@@ -34,7 +34,8 @@ export async function ServerCall(this: Rossa, options: serverOptions) {
 
     fetch: async (req, server) => {
       //
-      return await new Runner(req, server, this.apt).response();
+
+      return await new Runner(req, server, this.apt, this.base).response();
     },
     websocket: {
       sendPings: true,
@@ -59,10 +60,11 @@ Create HTML Index file for local live
 -------------------------
 */
 export const createIndex = async (
-  server: serverOptions["server"],
+  server: serverOptions["server"] & { name?: string },
   dir: string,
+  base: string = "",
 ) => {
-  let { path, hostname, method, port } = server;
+  let { path, hostname, method, port, name } = server;
   const CTX = await new Runner(
     {
       url: `http://${hostname ?? "127.0.0.1"}:${port || 3000}${path}`,
@@ -74,9 +76,10 @@ export const createIndex = async (
 
   const AB = await CTX.arrayBuffer();
 
+  const inName = name ? `/${name}` : "";
   if (AB.byteLength) {
-    write(dir + "/index.html", inflateSync(AB));
+    await write(dir + base + `${inName}/index.html`, inflateSync(AB));
   }
 
-  return;
+  return inName + "/index";
 };
