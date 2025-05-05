@@ -90,6 +90,13 @@ export class request {
   get path() {
     return this.url.pathname;
   }
+  get hash() {
+    return this.url.hash;
+  }
+  get fullPath() {
+    const { pathname, hash } = this.url;
+    return pathname + hash;
+  }
   get parsed() {
     const { parsed } = parsePath(this.path);
     return parsed;

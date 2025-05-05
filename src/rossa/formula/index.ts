@@ -1,5 +1,5 @@
 import { yveOptions } from "..";
-import { $$, addBASE, isArr, isStr, oAss, obj } from "../../@";
+import { addBASE, isArr, isStr, oAss, obj } from "../../@";
 import { pathConfig, wssConfig, setPath } from "../../storage";
 import { websocket } from "../../wss";
 import { response } from "../../response";
@@ -17,7 +17,7 @@ class routeCFG {
 
   declare wss: (
     path: string,
-    config: wssConfig,
+    config?: wssConfig,
   ) => <T extends typeof websocket>(f?: T | undefined) => T | undefined;
 
   declare error: (
@@ -42,16 +42,16 @@ class routeCFG {
 export class Formula extends routeCFG {
   apt: string;
   base: string;
-  _statics?: obj<Response>;
+  protected _statics?: obj<Response>;
   constructor(
     public dir: string = ".",
     options: yveOptions = {},
   ) {
     super();
-    const { root: _dir, base, appDir } = options;
+    const { dir: _dir, base, clientDir } = options;
 
     if (_dir) this.dir = _dir;
-    this.apt = this.dir + "/" + (appDir ?? "client");
+    this.apt = clientDir ? clientDir : "./client";
     this.base = base ?? "";
 
     this.files = (...file: ([string, pathConfig] | string)[]) => {

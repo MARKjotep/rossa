@@ -1,4 +1,5 @@
 import { responses } from "..";
+import { log } from "../../@";
 import { Runner } from "../../runner";
 
 export function ContextString(
@@ -7,6 +8,7 @@ export function ContextString(
   status?: number,
 ): string {
   this.status = status || 200;
+
   if (typeof ctx === "object") {
     this.type = "application/json";
     return JSON.stringify(ctx);

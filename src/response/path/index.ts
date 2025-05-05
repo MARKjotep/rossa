@@ -4,7 +4,7 @@ import { responseBody, Runner } from "../../runner";
 import { getPath } from "../../storage";
 import { CTX } from "../context";
 import { ESTREAM } from "../estream";
-import { $$, oAss } from "../../@";
+import { log } from "../../@";
 
 export async function PATH(this: Runner): Promise<responseBody> {
   const { serverPath, args, session } = await getPath.call(this, "path");
@@ -33,7 +33,6 @@ export async function PATH(this: Runner): Promise<responseBody> {
   if (F?.[method]) {
     const ctx = await F[method]();
     this.status = 200;
-
     return this.compress("deflate", (await CTX.call(this, F, ctx)) ?? "");
   }
 

@@ -1,13 +1,4 @@
-import {
-  $$,
-  _htmlHead,
-  headType,
-  Mapper,
-  oAss,
-  obj,
-  setCookie,
-  Time,
-} from "../@";
+import { _htmlHead, headType, Mapper, oAss, obj, setCookie, Time } from "../@";
 import { request } from "../request";
 import { ResponseSession } from "../session";
 import { eStream } from "./estream";
@@ -25,6 +16,7 @@ export class response extends ResponseSession implements response {
   status?: number;
   stream?: eStream;
   path: string;
+  hash: string;
   private headers: obj<string> = {};
   constructor(
     public request: request,
@@ -33,6 +25,7 @@ export class response extends ResponseSession implements response {
     super();
 
     this.path = request.path;
+    this.hash = request.hash;
   }
   get?(): Promise<any> | any;
   post?(): Promise<any> | any;

@@ -1,6 +1,6 @@
 import { BunFile, file } from "bun";
 import { getPath } from "../../storage";
-import { $$, getByteRange, isArraybuff } from "../../@";
+import { getByteRange, isArraybuff } from "../../@";
 import { responseBody, Runner } from "../../runner";
 import { FOLDER } from "./folder";
 

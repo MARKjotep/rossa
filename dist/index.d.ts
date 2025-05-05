@@ -4,8 +4,41 @@ import { Server, ServerWebSocket, Serve, WebSocketHandler } from 'bun';
 
 type obj<T> = Record<string, T>;
 
-declare class $$ {
-    static set p(a: any);
+/**
+ * A custom Map implementation that provides additional utility methods for working with objects and maps.
+ *
+ * @template K - The type of the keys in the map.
+ * @template V - The type of the values in the map.
+ */
+declare class Mapper<K, V> extends Map<K, V> {
+    obj(obj?: object | null): void;
+    map(map: Mapper<K, V>): void;
+    ass<T>(key: K, obj: T): void;
+    lacks(key: K): boolean;
+    init(key: K, val: V): V;
+}
+
+declare class log {
+    static set i(a: any);
+    static set e(a: any);
+    static set w(a: any);
+}
+
+declare class Time {
+    date: Date;
+    constructor(dateMS?: number);
+    delta(date2?: number | null, _Date?: boolean): number | Date;
+    timed(time?: {
+        year?: number;
+        month?: number;
+        day?: number;
+        hour?: number;
+        minute?: number;
+        second?: number;
+    }): Date;
+    static delta(date1: number, date2?: number | null): number;
+    static local(date: number): string;
+    static get now(): number;
 }
 
 declare class session {
@@ -52,6 +85,8 @@ declare class request {
     get ip(): bun.SocketAddress | null | undefined;
     get isForm(): boolean;
     get path(): string;
+    get hash(): string;
+    get fullPath(): string;
     get parsed(): string[];
     get searchParams(): URLSearchParams;
     get range(): string | undefined;
@@ -85,6 +120,7 @@ declare class response extends ResponseSession implements response {
     status?: number;
     stream?: eStream;
     path: string;
+    hash: string;
     private headers;
     constructor(request: request, args?: Record<string, string>);
     get?(): Promise<any> | any;
@@ -129,7 +165,6 @@ interface pathConfig {
     preload?: boolean;
 }
 interface wssConfig {
-    credentials?: boolean;
     broadcast?: boolean;
     maxClient?: number;
     requireSession?: boolean;
@@ -143,7 +178,7 @@ declare class routeCFG {
      * - /url/\<string:hell>
      */
     route: (path: string) => <T extends typeof response>(f?: T | undefined) => T | undefined;
-    wss: (path: string, config: wssConfig) => <T extends typeof websocket>(f?: T | undefined) => T | undefined;
+    wss: (path: string, config?: wssConfig) => <T extends typeof websocket>(f?: T | undefined) => T | undefined;
     error: (...codes: number[]) => <T extends typeof response>(f?: T | undefined) => T | undefined;
     folders: (...folder: ([
         string,
@@ -157,26 +192,19 @@ declare class Formula extends routeCFG {
     dir: string;
     apt: string;
     base: string;
-    _statics?: obj<Response>;
+    protected _statics?: obj<Response>;
     constructor(dir?: string, options?: yveOptions);
     protected _base(str: string): string;
 }
 
-interface dev {
-    path?: string;
-    hostname?: string;
-    method?: string;
-    port?: number;
-}
-
 interface yveOptions {
-    root?: string;
-    appDir?: string;
+    dir?: string;
+    clientDir?: string;
     envPath?: string;
     session?: Auth;
     base?: string;
 }
-type _server = (server?: Partial<Serve> & dev, wss?: Partial<WebSocketHandler>) => void;
+type _server = (server?: Partial<Serve> & dev, wss?: Partial<WebSocketHandler>) => Promise<void>;
 declare class Rossa extends Formula {
     html: (server?: dev & {
         name?: string;
@@ -193,4 +221,34 @@ declare class Render<T> {
     static jwt(jwtSession: any): Promise<Render<ServerSide>>;
 }
 
-export { $$, Render, Rossa, auths, response, websocket };
+interface fs {
+    [key: string]: string | undefined | boolean | number;
+}
+declare class JSONCacher<T extends fs> {
+    fs: string;
+    f_timed: number;
+    data: Map<any, T>;
+    key: string;
+    dir: string;
+    constructor({ dir, fs, key }: {
+        dir: string;
+        fs: string;
+        key: string;
+    });
+    init(): Promise<void>;
+    get(val: string | undefined): Promise<T | null>;
+    queue(): Promise<void>;
+    set(data: T): Promise<boolean>;
+    delete(key: string): Promise<void>;
+    json(): Promise<any>;
+}
+
+interface dev {
+    path?: string;
+    hostname?: string;
+    method?: string;
+    port?: number;
+}
+
+export { JSONCacher, Mapper, Render, Rossa, Time, auths, log, response, websocket };
+export type { dev };

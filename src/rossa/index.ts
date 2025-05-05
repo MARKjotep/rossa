@@ -1,15 +1,16 @@
 import { Auth } from "authored";
 import { Formula } from "./formula";
-import { createIndex, dev, ServerCall } from "../server";
+import { createIndex, ServerCall } from "../server";
 import { initEnv } from "../@/bun";
 import { config } from "dotenv";
 import { S } from "../session";
 import { Serve, WebSocketHandler } from "bun";
-import { $$, obj } from "../@";
+import { log, obj } from "../@";
+import { dev } from "..";
 
 export interface yveOptions {
-  root?: string;
-  appDir?: string;
+  dir?: string;
+  clientDir?: string;
   envPath?: string;
   session?: Auth;
   base?: string;
@@ -18,7 +19,7 @@ export interface yveOptions {
 type _server = (
   server?: Partial<Serve> & dev,
   wss?: Partial<WebSocketHandler>,
-) => void;
+) => Promise<void>;
 
 export class Rossa extends Formula {
   html: (server?: dev & { name?: string }) => Promise<void>;
@@ -45,12 +46,15 @@ export class Rossa extends Formula {
       const nm = await createIndex(server, this.apt, this.base);
 
       const dt = new Date().toLocaleTimeString();
-      $$.p = `${nm}.html @ ${dt}`;
+
+      log.i = `${nm}.html @ ${dt}`;
     };
 
     this.serve = async (
       server: Partial<Serve> & dev = {},
       wss?: Partial<WebSocketHandler>,
     ) => await ServerCall.call(this, { server, wss });
+
+    this.folders("/");
   }
 }

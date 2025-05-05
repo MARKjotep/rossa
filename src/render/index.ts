@@ -1,5 +1,5 @@
 import { ServerSide } from "authored";
-import { $$, obj } from "../@";
+import { obj } from "../@";
 import { Runner } from "../runner";
 import { getPath } from "../storage";
 

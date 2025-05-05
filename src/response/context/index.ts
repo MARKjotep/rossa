@@ -5,7 +5,7 @@ import { RESPONSE } from "./response";
 import { POST } from "./post";
 import { Render, RENDER } from "../../render";
 import { ContextString } from "./string";
-import { $$, oLen } from "../../@";
+import { isNumber, oLen } from "../../@";
 
 export { ContextString } from "./string";
 
@@ -34,7 +34,7 @@ export async function CTX(
 
   if (!ctx) return noCTX.call(this, F.status);
 
-  if (typeof ctx === "object" && "error" in ctx) {
+  if (typeof ctx === "object" && "error" in ctx && isNumber(ctx.error)) {
     this.status = ctx.error as number;
     return null;
   }

@@ -3,19 +3,14 @@ import { Rossa } from "../rossa";
 import { socketConfig } from "../wss";
 import { Runner } from "../runner";
 import { getTLS } from "../@/bun";
-import { $$ } from "../@";
+import { log } from "../@";
+import { dev } from "..";
 
 /*
 -------------------------
 process the server call here
 -------------------------
 */
-export interface dev {
-  path?: string;
-  hostname?: string;
-  method?: string;
-  port?: number;
-}
 
 interface serverOptions {
   server: Partial<Serve> & dev;
@@ -29,12 +24,9 @@ export async function ServerCall(this: Rossa, options: serverOptions) {
     ...server,
     ...(this._statics && { static: this._statics }),
     port: server.port || 3000,
-
     tls: getTLS(this.dir),
-
     fetch: async (req, server) => {
       //
-
       return await new Runner(req, server, this.apt, this.base).response();
     },
     websocket: {
@@ -75,11 +67,15 @@ export const createIndex = async (
   ).response();
 
   const AB = await CTX.arrayBuffer();
+  const pslc = path?.slice(1);
 
-  const inName = name ? `/${name}` : "";
+  const inName = name ? `/${name}` : pslc ? "/" + pslc : "";
+
+  const inP = inName.split("#")[0];
+
   if (AB.byteLength) {
-    await write(dir + base + `${inName}/index.html`, inflateSync(AB));
+    await write(dir + base + `${inP}/index.html`, inflateSync(AB));
   }
 
-  return inName + "/index";
+  return inP + "/index";
 };

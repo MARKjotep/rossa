@@ -1,5 +1,5 @@
 import { file } from "bun";
-import { $$, MinStorage, oVals, SymStorage } from "../@";
+import { log, MinStorage, oVals, SymStorage } from "../@";
 import { authorized, ResponseSession } from "../session";
 import { Runner } from "../runner";
 import { response } from "../response";
@@ -10,7 +10,6 @@ export interface pathConfig {
   preload?: boolean;
 }
 export interface wssConfig {
-  credentials?: boolean;
   broadcast?: boolean;
   maxClient?: number;
   requireSession?: boolean;
@@ -39,10 +38,12 @@ class ServerPath extends MinStorage {
   get serverClass(): typeof response | typeof websocket | undefined {
     return this._class;
   }
-  async loadBytes(basePath?: string) {
+  async loadBytes(basePath: string = ".") {
     if (!(this.config as pathConfig).preload) return;
     try {
-      const fl = file(this.path);
+      log.i = this.path;
+      const PT = this.path.startsWith("/") ? this.path : "/" + this.path;
+      const fl = file(basePath + this.path);
       this.fileType = fl.type;
       this.bytes = await fl.bytes();
       this.fileSize = this.bytes.byteLength;
@@ -100,13 +101,19 @@ export async function getPath(
   this: Runner,
   type: storageType,
 ): Promise<serverPath> {
+  if (type === "folder") {
+  } else {
+  }
   const [serverPath, args] = getStorage(type).get(this.path);
-
-  if (!serverPath) return arg;
+  if (!serverPath) {
+    //
+    return arg;
+  }
 
   const { requireSession } = serverPath.config;
 
   let session: ResponseSession | undefined = undefined;
+
   if (requireSession) {
     session = await authorized(await this.request.authgroup(), args);
     if (!session) return arg;

@@ -1,6 +1,5 @@
 import { ServerSide } from "authored";
 import { JWT, responses } from "..";
-import { $$ } from "../../@";
 import { Runner } from "../../runner";
 import { ContextString } from "./string";
 

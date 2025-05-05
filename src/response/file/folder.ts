@@ -1,5 +1,5 @@
 import { getFile } from ".";
-import { $$, parsePath } from "../../@";
+import { log, parsePath } from "../../@";
 import { responseBody, Runner } from "../../runner";
 import { getPath } from "../../storage";
 
@@ -10,8 +10,10 @@ export async function FOLDER(this: Runner): Promise<responseBody> {
   this.path = fpath;
 
   const { serverPath } = await getPath.call(this, "folder");
-
-  if (!serverPath) return null;
+  if (!serverPath) {
+    // get the *
+    return null;
+  }
 
   this.path = apath;
   return await getFile.call(this);

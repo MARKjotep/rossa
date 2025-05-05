@@ -40,8 +40,8 @@
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.9",
     "@types/bun": "1.2.2",
-    "rollup": "^4.34.8",
-    "rollup-plugin-dts": "^6.1.1"
+    "rollup": "^4.39.0",
+    "rollup-plugin-dts": "^6.2.1"
   },
   "peerDependencies": {
     "typescript": "^5.7.2"
