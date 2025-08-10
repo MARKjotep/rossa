@@ -16,8 +16,10 @@ export interface yveOptions {
   base?: string;
 }
 
+export type for_srver = Partial<Serve> & dev & { fn?: (port: number) => void };
+
 type _server = (
-  server?: Partial<Serve> & dev,
+  server?: for_srver,
   wss?: Partial<WebSocketHandler>,
 ) => Promise<void>;
 
@@ -51,7 +53,7 @@ export class Rossa extends Formula {
     };
 
     this.serve = async (
-      server: Partial<Serve> & dev = {},
+      server: for_srver = {},
       wss?: Partial<WebSocketHandler>,
     ) => await ServerCall.call(this, { server, wss });
 

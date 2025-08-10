@@ -1,6 +1,6 @@
 import { ServerSide, Auth } from 'authored';
 import * as bun from 'bun';
-import { Server, ServerWebSocket, Serve, WebSocketHandler } from 'bun';
+import { Server, ServerWebSocket, WebSocketHandler, Serve } from 'bun';
 
 type obj<T> = Record<string, T>;
 
@@ -70,6 +70,7 @@ declare class request {
     method: string;
     __cookies: Map<string, string>;
     constructor(req: Request, server?: Server | undefined);
+    json<T extends {}>(): Promise<T>;
     form(): Promise<FormData>;
     authgroup(): Promise<{
         sid: string;
@@ -204,7 +205,10 @@ interface yveOptions {
     session?: Auth;
     base?: string;
 }
-type _server = (server?: Partial<Serve> & dev, wss?: Partial<WebSocketHandler>) => Promise<void>;
+type for_srver = Partial<Serve> & dev & {
+    fn?: (port: number) => void;
+};
+type _server = (server?: for_srver, wss?: Partial<WebSocketHandler>) => Promise<void>;
 declare class Rossa extends Formula {
     html: (server?: dev & {
         name?: string;

@@ -13,17 +13,20 @@ process the server call here
 */
 
 interface serverOptions {
-  server: Partial<Serve> & dev;
+  server: Partial<Serve> & dev & { fn?: (port: number) => void };
   wss?: Partial<WebSocketHandler>;
 }
 
 export async function ServerCall(this: Rossa, options: serverOptions) {
   const { server, wss } = options;
+  const ffn = server.fn;
+  delete server.fn;
 
+  const port = server.port || 3000;
   const SV = serve({
     ...server,
     ...(this._statics && { static: this._statics }),
-    port: server.port || 3000,
+    port,
     tls: getTLS(this.dir),
     fetch: async (req, server) => {
       //
@@ -36,6 +39,8 @@ export async function ServerCall(this: Rossa, options: serverOptions) {
       ...socketConfig,
     },
   });
+
+  ffn?.(port);
 
   const shutdown = () => {
     SV.stop();

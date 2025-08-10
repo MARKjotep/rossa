@@ -18,6 +18,9 @@ export class request {
     -------------------------
     */
   }
+  async json<T extends {}>(): Promise<T> {
+    return await this.req.json();
+  }
   async form(): Promise<FormData> {
     if (this.isForm) {
       if (!this.formData) {

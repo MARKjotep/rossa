@@ -71,7 +71,7 @@ export class Runner extends Pres {
       ctx = await ERROR.call(this);
     }
 
-    return new Response(ctx, this.init);
+    return new Response(ctx as BodyInit, this.init);
   }
   protected _base(str: string) {
     return addBASE(this.base, str);
