@@ -1,4 +1,4 @@
-import { inflateSync, serve, Serve, WebSocketHandler, write } from "bun";
+import { file, inflateSync, serve, Serve, WebSocketHandler, write } from "bun";
 import { Rossa } from "../rossa";
 import { socketConfig } from "../wss";
 import { Runner } from "../runner";
@@ -22,12 +22,17 @@ export async function ServerCall(this: Rossa, options: serverOptions) {
   const ffn = server.fn;
   delete server.fn;
 
+  const { key, cert } = getTLS(this.dir);
+
   const port = server.port || 3000;
   const SV = serve({
     ...server,
     ...(this._statics && { static: this._statics }),
     port,
-    tls: getTLS(this.dir),
+    tls: {
+      key: await key.text(),
+      cert: await cert.text(),
+    },
     fetch: async (req, server) => {
       //
       return await new Runner(req, server, this.apt, this.base).response();

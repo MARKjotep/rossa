@@ -5,7 +5,7 @@ export { auths } from "./session";
 export { Render } from "./render";
 
 export { log, Mapper, Time } from "./@";
-export { JSONCacher } from "./@/bun";
+export { getTLS, JSONCacher } from "./@/bun";
 
 export interface dev {
   path?: string;

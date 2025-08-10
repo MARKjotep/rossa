@@ -1,6 +1,6 @@
 import { ServerSide, Auth } from 'authored';
 import * as bun from 'bun';
-import { Server, ServerWebSocket, WebSocketHandler, Serve } from 'bun';
+import { Server, ServerWebSocket, WebSocketHandler, Serve, BunFile } from 'bun';
 
 type obj<T> = Record<string, T>;
 
@@ -247,6 +247,8 @@ declare class JSONCacher<T extends fs> {
     json(): Promise<any>;
 }
 
+declare const getTLS: (dir: string) => Record<string, BunFile>;
+
 interface dev {
     path?: string;
     hostname?: string;
@@ -254,5 +256,5 @@ interface dev {
     port?: number;
 }
 
-export { JSONCacher, Mapper, Render, Rossa, Time, auths, log, response, websocket };
+export { JSONCacher, Mapper, Render, Rossa, Time, auths, getTLS, log, response, websocket };
 export type { dev };
