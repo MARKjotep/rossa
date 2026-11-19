@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "module": "esnext",
+    "lib": ["ESNext", "DOM"],
+    "rootDir": ".",
+    "strictBindCallApply": true,
+    "noImplicitThis": true,
+    "noImplicitAny": true,
+    "allowJs": true,
+    "checkJs": false,
+    "removeComments": false,
+    "noEmit": true,
+
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+    "composite": false,
+    //
+
+    "allowSyntheticDefaultImports": true,
+    "allowArbitraryExtensions": true,
+    "alwaysStrict": true,
+    "strictNullChecks": true,
+    "strict": true,
+    "strictPropertyInitialization": true,
+    // ----
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Modern TS hygiene:
+    "verbatimModuleSyntax": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+    //
+  },
+  "exclude": ["dist", "types"]
+}

@@ -1,0 +1,49 @@
+{
+  "name": "rossa",
+  "version": "0.0.5",
+  "description": "Rossa Bun JS framework",
+  "author": "Marky <markjotep@gmail.com>",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "init": "bun update && mkdir -p ./src ./dist  ./types && {  [ ! -f ./src/index.ts ] && touch ./src/index.ts; }",
+    "test": "bun test",
+    "test:load": "bun run test/load/benchmark.ts"
+  },
+  "keywords": [
+    "ts",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MARKjotep/rossa.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MARKjotep/rossa/issues"
+  },
+  "homepage": "https://github.com/MARKjotep/rossa#readme",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohmyqt/oven": "link:@ohmyqt/oven",
+    "@ohmyqt/u": "link:@ohmyqt/u",
+    "@types/bun": "^1.4.4",
+    "fake-indexeddb": "^6.2.8",
+    "reflect-metadata": "^0.2.2",
+    "typescript": "^5.9.3"
+  },
+  "type": "module"
+}

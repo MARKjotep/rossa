@@ -1,0 +1,194 @@
+import { sql, type SQL } from "bun";
+import type { Column } from "../column";
+import type { DbDialectAdapter, TableStats } from "./dialect";
+import { quoteIdentifier, quoteTable, tableParts } from "../identifier";
+import type { Schema } from "../schema";
+
+function tableFragment(schema: Schema<any>) {
+  return sql.unsafe(quoteTable(schema.table));
+}
+
+function joinSql(fragments: any[]) {
+  return fragments.reduce((left, right, index) =>
+    index === 0 ? right : sql`${left}, ${right}`,
+  );
+}
+
+function renderDefault(column: Column): string {
+  if (!column.hasDefault) return "";
+  if (column.defaultIsCurrentTimestamp) return " DEFAULT CURRENT_TIMESTAMP";
+  if (typeof column.defaultValue === "string") {
+    return ` DEFAULT '${column.defaultValue.replace(/'/g, "''")}'`;
+  }
+  if (typeof column.defaultValue === "boolean") {
+    return ` DEFAULT ${column.defaultValue ? 1 : 0}`;
+  }
+  return ` DEFAULT ${column.defaultValue}`;
+}
+
+function renderType(column: Column): string {
+  switch (column.type) {
+    case "text":
+    case "json":
+    case "timestamp":
+      return "TEXT";
+    case "integer":
+    case "bigint":
+    case "serial":
+      return "INTEGER";
+    case "boolean":
+      return "INTEGER";
+    case "numeric":
+      return "REAL";
+  }
+}
+
+function renderColumn(name: string, column: Column): string {
+  return [
+    quoteIdentifier(name),
+    renderType(column),
+    column.primaryKey ? "PRIMARY KEY" : "",
+    column.required ? "NOT NULL" : "",
+    column.isUnique ? "UNIQUE" : "",
+    renderDefault(column).trim(),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function getColumns(db: SQL, schema: Schema<any>): Promise<string[]> {
+  const [database, table] = tableParts(schema.table);
+  const pragmaDatabase = database ? `${quoteIdentifier(database)}.` : "";
+  const rows = await db<{ name: string }[]>`${sql.unsafe(
+    `PRAGMA ${pragmaDatabase}table_info(${quoteIdentifier(table)})`,
+  )}`;
+  return rows.map((row) => row.name);
+}
+
+export const sqliteDialect: DbDialectAdapter = {
+  name: "sqlite",
+  quoteIdentifier,
+  quoteTable,
+  normalizeColumnName(name) {
+    return name.toLowerCase();
+  },
+  buildColumn: renderColumn,
+  buildColumnType(column) {
+    return [
+      renderType(column),
+      column.primaryKey ? "PRIMARY KEY" : "",
+      column.required ? "NOT NULL" : "",
+      column.isUnique ? "UNIQUE" : "",
+      renderDefault(column).trim(),
+    ]
+      .filter(Boolean)
+      .join(" ");
+  },
+  normalizeOperator(operator) {
+    return operator.toUpperCase() === "ILIKE" ? "LIKE" : operator.toUpperCase();
+  },
+  async version(db) {
+    const [row] = await db<{ version: string }[]>`SELECT sqlite_version() AS version`;
+    if (!row?.version) throw new Error("SQLite did not return its version.");
+    return row.version;
+  },
+  async createTable(db, schema) {
+    await db`${sql.unsafe(schema.createSQL(this))}`;
+  },
+  getColumns,
+  async addColumn(db, schema, name, type) {
+    if (/\bPRIMARY KEY\b|\bUNIQUE\b/i.test(type)) {
+      throw new Error(
+        "SQLite cannot add PRIMARY KEY or UNIQUE constraints with ADD COLUMN; rebuild the table instead.",
+      );
+    }
+    await db`${sql.unsafe(
+      `ALTER TABLE ${quoteTable(schema.table)} ADD COLUMN ${quoteIdentifier(name)} ${type}`,
+    )}`;
+  },
+  async dropColumn(db, schema, name) {
+    await db`${sql.unsafe(
+      `ALTER TABLE ${quoteTable(schema.table)} DROP COLUMN ${quoteIdentifier(name)}`,
+    )}`;
+  },
+  async upsert<T extends Record<string, any>>(db: SQL, schema: Schema<T>, data: T, conflictColumn: keyof T) {
+    const keys = Object.keys(data);
+    if (keys.length === 0) throw new Error("Upsert requires at least one column value.");
+    const conflictName = String(conflictColumn);
+    const updates = keys.filter((key) => key !== conflictName);
+    const updateNames = updates.length ? updates : [conflictName];
+    const assignments = joinSql(
+      updateNames.map((name) =>
+        sql`${sql.unsafe(quoteIdentifier(name))} = excluded.${sql.unsafe(quoteIdentifier(name))}`,
+      ),
+    );
+    const [row] = await db<T[]>`
+      INSERT INTO ${tableFragment(schema)} ${sql(data)}
+      ON CONFLICT (${sql.unsafe(quoteIdentifier(conflictName))})
+      DO UPDATE SET ${assignments}
+      RETURNING *
+    `;
+    return row;
+  },
+  async listTables(db) {
+    const rows = await db<{ name: string }[]>`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    `;
+    return rows.map((row) => row.name);
+  },
+  async dropTable(db, schema) {
+    await db`${sql.unsafe(`DROP TABLE ${quoteTable(schema.table)}`)}`;
+  },
+  async truncateTable(db, schema) {
+    await db.begin(async (tx) => {
+      await tx`${sql.unsafe(`DELETE FROM ${quoteTable(schema.table)}`)}`;
+      const [database, table] = tableParts(schema.table);
+      const quotedDatabase = quoteIdentifier(database ?? "main");
+      const [sequenceTable] = await tx<{ name: string }[]>`${sql.unsafe(
+        `SELECT name FROM ${quotedDatabase}.sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence'`,
+      )}`;
+      if (sequenceTable) {
+        await tx`${sql.unsafe(`DELETE FROM ${quotedDatabase}.sqlite_sequence WHERE name = `)}${table}`;
+      }
+    });
+  },
+  async getTableStats(db, schema): Promise<TableStats> {
+    const [database, table] = tableParts(schema.table);
+    const [count] = await db<{ total: number }[]>`
+      SELECT COUNT(*) AS total FROM ${tableFragment(schema)}
+    `;
+    const pragmaDatabase = database ? `${quoteIdentifier(database)}.` : "";
+    const indices = await db`${sql.unsafe(
+      `PRAGMA ${pragmaDatabase}index_list(${quoteIdentifier(table)})`,
+    )}`;
+    return {
+      rowCount: Number(count?.total ?? 0),
+      diskSize: "N/A (SQLite file-level)",
+      indexCount: indices.length,
+    };
+  },
+  async getTableIndices(db, schema) {
+    const [database, table] = tableParts(schema.table);
+    const pragmaDatabase = database ? `${quoteIdentifier(database)}.` : "";
+    return db`${sql.unsafe(
+      `PRAGMA ${pragmaDatabase}index_list(${quoteIdentifier(table)})`,
+    )}`;
+  },
+  async getTableSchema(db, schema) {
+    const [database, table] = tableParts(schema.table);
+    const pragmaDatabase = database ? `${quoteIdentifier(database)}.` : "";
+    return db`${sql.unsafe(
+      `PRAGMA ${pragmaDatabase}table_info(${quoteIdentifier(table)})`,
+    )}`;
+  },
+  async getTableData(db, schema, limit, offset) {
+    return await db`
+      SELECT * FROM ${tableFragment(schema)}
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  },
+  async optimize(db) {
+    await db`${sql.unsafe("VACUUM")}`;
+  },
+};

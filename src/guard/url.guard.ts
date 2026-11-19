@@ -1,0 +1,176 @@
+import { createGuard } from "./@/base.guard";
+import { sendError } from "@/http/res";
+
+export interface UrlValidationOptions {
+  maxUrlLength?: number;
+  maxQueryLength?: number;
+  allowedKeys?: string[]; // Strict whitelist of allowed query parameter keys
+  disallowedKeys?: string[]; // Blacklist forbidden query parameter keys
+  noDuplicates?: boolean; // Reject duplicate query keys (e.g., ?id=1&id=2)
+  sanitizePaths?: boolean; // Block path traversal attempts (../ or %2e%2e)
+  patterns?: Record<string, RegExp>; // Enforce regex matching per query key
+}
+
+const DEFAULT_MAX_URL = 2048; // 2 KB
+const DEFAULT_MAX_QUERY = 1024; // 1 KB
+
+/**
+ * Validates URL and query limits, query keys, duplicate keys, and path safety.
+ *
+ * @param options - URL size, query, and path validation rules.
+ * @returns A guard factory that accepts validation rules and optional error config.
+ */
+export const validateUrl = createGuard<
+  UrlValidationOptions | number | void
+>(
+  async (ctx, next, options, errorConfig) => {
+    // 1. Normalize Options
+    const opts: UrlValidationOptions =
+      typeof options === "number" ? { maxUrlLength: options } : options || {};
+
+    const maxUrl = opts.maxUrlLength ?? DEFAULT_MAX_URL;
+    const maxQuery = opts.maxQueryLength ?? DEFAULT_MAX_QUERY;
+
+    // 2. Parse URL safely (Handles string or native URL object)
+    let urlObj: URL;
+    try {
+      urlObj =
+        typeof ctx.req.url === "string"
+          ? new URL(ctx.req.url, "http://localhost")
+          : ctx.req.url;
+    } catch {
+      return sendError({
+        code: 400,
+        message: "Malformed URL structure.",
+      });
+    }
+
+    const fullUrl = urlObj.href;
+
+    // 3. Full URL Length Guard
+    if (fullUrl.length > maxUrl) {
+      return sendError({
+        code: 414,
+        message: `URI Too Long. Exceeds limit of ${maxUrl} characters.`,
+      });
+    }
+
+    // 4. Query String Extraction & Length Guard
+    const queryString = urlObj.search.startsWith("?")
+      ? urlObj.search.slice(1)
+      : urlObj.search;
+
+    if (queryString.length > maxQuery) {
+      return sendError({
+        code: 414,
+        message: `Query string too long. Exceeds limit of ${maxQuery} characters.`,
+      });
+    }
+
+    // 5. Path Traversal & Injection Guard
+    if (opts.sanitizePaths !== false) {
+      let decodedUrl = fullUrl;
+      try {
+        // Multi-pass decoding catches double-encoded traversal attempts (%252e -> %2e -> .)
+        let previousUrl = "";
+        while (decodedUrl !== previousUrl && decodedUrl.includes("%")) {
+          previousUrl = decodedUrl;
+          decodedUrl = decodeURIComponent(decodedUrl);
+        }
+      } catch {
+        return sendError({
+          code: 400,
+          message: "Malformed percent-encoding in URL.",
+        });
+      }
+
+      // Detect null byte injection
+      if (decodedUrl.includes("\0")) {
+        return sendError({
+          code: 400,
+          message: "Null byte injection detected in URL.",
+        });
+      }
+
+      // Detect directory traversal sequences
+      if (
+        decodedUrl.includes("../") ||
+        decodedUrl.includes("..\\") ||
+        decodedUrl.includes("/..")
+      ) {
+        return sendError({
+          code: 400,
+          message: "Path traversal attempt detected in URL.",
+        });
+      }
+    }
+
+    // 6. Query Parameter Inspection
+    const searchParams = urlObj.searchParams;
+    const keysPresent = Array.from(searchParams.keys());
+
+    if (keysPresent.length > 0) {
+      // A. Check for Duplicate Parameters
+      if (opts.noDuplicates) {
+        const uniqueKeys = new Set(keysPresent);
+        if (uniqueKeys.size !== keysPresent.length) {
+          return sendError({
+            code: errorConfig.code ?? 400,
+            message: "Duplicate query parameters are not allowed.",
+          });
+        }
+      }
+
+      // B. Key Whitelisting
+      if (opts.allowedKeys) {
+        const allowedSet = new Set(opts.allowedKeys);
+        for (const key of keysPresent) {
+          if (!allowedSet.has(key)) {
+            return sendError({
+              code: errorConfig.code ?? 400,
+              message: `Unauthorized query parameter: '${key}'`,
+            });
+          }
+        }
+      }
+
+      // C. Key Blacklisting
+      if (opts.disallowedKeys) {
+        const forbiddenSet = new Set(opts.disallowedKeys);
+        for (const key of keysPresent) {
+          if (forbiddenSet.has(key)) {
+            return sendError({
+              code: errorConfig.code ?? 400,
+              message: `Forbidden query parameter: '${key}'`,
+            });
+          }
+        }
+      }
+
+      // D. Regex Pattern Validation per Query Parameter (Validates all array values)
+      if (opts.patterns) {
+        for (const [key, pattern] of Object.entries(opts.patterns)) {
+          const values = searchParams.getAll(key);
+          for (const val of values) {
+            pattern.lastIndex = 0;
+            const matches = pattern.test(val);
+            pattern.lastIndex = 0;
+            if (!matches) {
+              return sendError({
+                code: errorConfig.code ?? 400,
+                message: `Invalid format for query parameter '${key}'.`,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return await next();
+  },
+  {
+    id: "url-validator",
+    code: 400,
+    message: "URL validation failed",
+  },
+);
