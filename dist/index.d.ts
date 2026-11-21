@@ -779,6 +779,8 @@ declare class RouterManager {
     }>;
     protected match(method: methodsKeys, url: string): HttpRouteMatch;
     printRoutes(): void;
+    /** Returns registered HTTP paths, including the base path, with parameter colons removed. */
+    getPaths(): string[];
 }
 
 interface dev {
@@ -815,7 +817,7 @@ declare class Rossa extends RouterManager {
     private pipeline;
     private processRouter;
     private processWSS;
-    test(req: Request): Promise<Response>;
+    test(req: Request, encoding?: ContentEncodingType): Promise<Response>;
     serve(server?: serverOptions["server"], wss?: serverOptions["wss"]): Bun.Server<undefined>;
     protected errorHandler(res: res, error: any): Response;
 }
@@ -1246,7 +1248,7 @@ declare const jwtRefresh: (options?: JWTAuthService<any> | undefined, overrideCo
  * @param label - Optional text included in the log entry.
  * @returns A guard factory that accepts a label and optional error config.
  */
-declare const logger: (options?: string | void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const logger: (options?: void | string | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 type logFN = {
     ctx: ctx;
     res: Response;
@@ -1486,7 +1488,7 @@ interface UrlValidationOptions {
  * @param options - URL size, query, and path validation rules.
  * @returns A guard factory that accepts validation rules and optional error config.
  */
-declare const validateUrl: (options?: number | void | UrlValidationOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const validateUrl: (options?: void | number | UrlValidationOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 /**
  * Parses an URL-encoded form request and stores its fields in `ctx.form`.
@@ -1508,7 +1510,7 @@ declare class _FieldScope {
     static use<T extends Record<string, any>>(scopeName: string): ScopeProxy<T>;
 }
 /**
- * Describes the static interface of the Scope class
+ * Describes the static interface of the Field class
  */
 interface FieldScopeStatic {
     register<Config extends Record<string, Record<string, any>>>(data: Config): FieldScopeSet<Config>;
@@ -1517,5 +1519,22 @@ interface FieldScopeStatic {
 type Field = _FieldScope;
 declare const Field: FieldScopeStatic;
 
-export { Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, Field, ForeignKeyError, JWTAuthService, Methods, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaBuilder, ServerSide, SessionAuthInterface, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, multipart, mysqlDialect, postgresDialect, rateLimit, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z };
+type ScopeSet<Config extends Record<string, Record<string, any>>> = {
+    use<Name extends keyof Config & string>(name: Name): Config[Name];
+};
+/** Named, shared values for use in functions, classes, or application setup. */
+declare class _Scope {
+    private static registry;
+    static register<Config extends Record<string, Record<string, any>>>(data: Config): ScopeSet<Config>;
+    static use<T extends Record<string, any>>(name: string): T;
+}
+/** Describes the static interface of the Scope class. */
+interface ScopeStatic {
+    register<Config extends Record<string, Record<string, any>>>(data: Config): ScopeSet<Config>;
+    use<T extends Record<string, any>>(name: string): T;
+}
+type Scope = _Scope;
+declare const Scope: ScopeStatic;
+
+export { Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, Field, ForeignKeyError, JWTAuthService, Methods, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaBuilder, Scope, ServerSide, SessionAuthInterface, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, multipart, mysqlDialect, postgresDialect, rateLimit, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z };
 export type { AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, JWTConfig, JwtPayload, JwtRefreshTokenStore, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SanitizeOptions, SecurityHeadersOptions, SessionConfig, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };

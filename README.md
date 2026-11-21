@@ -42,6 +42,13 @@ app.register(Users);
 app.serve({ port: 3000, hostname: "localhost" });
 ```
 
+Call `app.getPaths()` after registering controllers to get an array of HTTP
+route paths, including any `basePath`. Parameter names have their colons removed:
+
+```ts
+app.getPaths(); // ["/users/id"]
+```
+
 `Rossa` accepts these options:
 
 | Option           | Default      | Purpose                                                                                                   |

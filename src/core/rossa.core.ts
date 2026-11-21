@@ -203,12 +203,12 @@ export class Rossa extends RouterManager {
 
   // --- Tester ---------------------------------------------------------------
 
-  async test(req: Request) {
+  async test(req: Request, encoding?: ContentEncodingType) {
     // this.compileRoutesList();
 
     const NC = new ctx(
       new Res(
-        { encoding: this.options.Encoding },
+        { encoding: encoding ?? this.options.Encoding },
         new Req(req, undefined, this.fileServer.isFile.bind(this.fileServer)),
         this.fileServer,
       ),

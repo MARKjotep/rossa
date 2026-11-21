@@ -289,6 +289,13 @@ export class RouterManager {
       })),
     );
   }
+
+  /** Returns registered HTTP paths, including the base path, with parameter colons removed. */
+  getPaths(): string[] {
+    return this.httpRoutes.map(({ path }) =>
+      path.replace(/:([a-zA-Z0-9_]+)/g, "$1"),
+    );
+  }
 }
 
 //-- _uRoute class
