@@ -56,6 +56,27 @@ export interface RossaOptions {
 
 //-- Rossa
 
+/**
+ * Turns a pipeline result into a `Response`.
+ *
+ * Guards and handlers are expected to return a `Response`. When a guard factory
+ * is mounted without invoking it (`@use(createGuard(...))` instead of
+ * `@use(createGuard(...)(...))`), the factory is called with `(ctx, next)` and
+ * returns the inner interceptor. Bun would then serve its default page, so this
+ * check answers with an explicit 500 instead.
+ */
+function asResponse(value: unknown): Response {
+  if (value instanceof Response) return value;
+
+  console.error(
+    "[rossa] Guard factory not invoked? Expected a Response but got:",
+    value,
+  );
+  return new Response("Internal Server Error: guard factory not invoked", {
+    status: 500,
+  });
+}
+
 export class Rossa extends RouterManager {
   protected options: Omit<Required<RossaOptions>, "fileExtensions">;
   declare fileServer: StaticFileServer;
@@ -223,7 +244,7 @@ export class Rossa extends RouterManager {
     };
 
     try {
-      return await runGlobalPipeline();
+      return asResponse(await runGlobalPipeline());
     } catch (error: any) {
       return this.errorHandler(ctx.res, error);
     }

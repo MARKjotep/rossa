@@ -15,6 +15,7 @@ import {
   loggerFN,
   multipart,
   rateLimit,
+  requireSession,
   route,
   sanitize,
   security,
@@ -355,20 +356,6 @@ type AccountSession = {
   displayName?: string;
 };
 
-/**
- * Requires a session that `session()` already loaded and whose `userId` was set
- * by a successful login. `session()` alone always succeeds, so this guard is
- * what turns a missing cookie into a real 401.
- */
-const requireSession = createGuard<void>(
-  async (ctx, next, _options, config) => {
-    const data = ctx.session as unknown as AccountSession | undefined;
-    if (!data || typeof data.userId !== "number") return sendError(config);
-    return next();
-  },
-  { id: "require-session", code: 401, message: "Authentication required" },
-);
-
 const AccountLoginBody = z.object({
   email: z.string().email(),
   password: z.string().min(1),
@@ -428,7 +415,9 @@ const SettingsBody = z.object({
  *   json(schema) (400/415) → rateLimit (429).
  *
  * The session must be resolved before CSRF because an anonymous request has no
- * identity to protect. CSRF runs before body parsing so a cross-site write is
+ * identity to protect. `requireSession` is the framework guard (a stored,
+ * unexpired session) and its validator requires the `userId` written at login.
+ * CSRF runs before body parsing so a cross-site write is
  * rejected without paying parse/validation cost. The schema rejects malformed
  * updates before the small authenticated-write budget is consumed, and the
  * limiter runs last to protect the account mutation itself.
@@ -436,7 +425,7 @@ const SettingsBody = z.object({
 @route("/api/account/settings")
 @use(
   session(sessions),
-  requireSession(),
+  requireSession((s) => typeof (s as AccountSession).userId === "number"),
   csrf(),
   json(SettingsBody),
   rateLimit({ max: 5, windowMs: 10_000 }),
@@ -617,7 +606,7 @@ const validateAvatar = createGuard<void>(
 @route("/api/account/avatar")
 @use(
   session(sessions),
-  requireSession(),
+  requireSession((s) => typeof (s as AccountSession).userId === "number"),
   contentType("multipart/form-data"),
   multipart(),
   validateAvatar(),

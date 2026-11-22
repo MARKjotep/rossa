@@ -37,6 +37,7 @@ export * from "./guard/content.guard";
 export * from "./guard/cookie.guard";
 export * from "./guard/cors.guard";
 export * from "./guard/csrf.guard";
+export * from "./guard/deny.guard";
 export * from "./guard/error.guard";
 export * from "./guard/header.guard";
 export * from "./guard/ip.guard";

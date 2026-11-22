@@ -26,6 +26,11 @@ runs earlier. Put wrapper guards such as `errorHandler` and
 argument to a guard factory to override its default error message, headers, or
 redirect where applicable; the HTTP status is set by the guard.
 
+Always invoke the guard factory: write `@use(deny())`, not `@use(deny)`. The
+pipeline rejects an un-invoked factory with a 500 and a console error naming the
+mistake, rather than silently serving a default page. Custom factories follow
+the same rule, so register `createGuard(...)(...)`, not `createGuard(...)`.
+
 ## Creating a custom guard
 
 Use `createGuard<TOptions>()` to define reusable request logic. Its handler
@@ -112,6 +117,7 @@ in `ctx.body`. Choose the guard that matches how the handler reads its data.
 | `jwtAuth(service)` | JWT access token | Calls `service.verify(token)` and stores decoded claims in `ctx.jwtData`. |
 | `jwtRefresh(service)` | Refresh token | Reads `x-refresh-token`, atomically consumes it, issues a replacement token pair in `ctx.data.jwtTokens`, and stores verified claims in `ctx.jwtData`. |
 | `session(service)` | Session lifecycle | Loads the session into `ctx.session`, runs downstream work, and persists or deletes session changes afterward. With no session cookie it creates an anonymous session. |
+| `requireSession(validator?)` | Verified session | Use after `session(service)`; continues only for a store-backed session — a validly signed cookie whose row exists and is not expired. Anonymous, forged, unknown-ID, and expired sessions get 401 "Authentication required" by default. An optional validator adds an identity check, e.g. `requireSession((s) => typeof (s as any).userId === "number")`. |
 | `authorize(check)` | Authorization | Runs a sync or async policy callback with `ctx`; returns 403 by default when it denies access. Use after authentication. |
 | `csrf(options?)` | CSRF token check | On POST, PUT, PATCH, and DELETE, compares a request header (default `x-csrf-token`) with the `csrf_token` cookie. The application must issue that cookie. |
 
@@ -137,6 +143,29 @@ authorization callback. The session guard creates an anonymous session when
 there is no valid session cookie, so check an application identity such as
 `ctx.session.userId` explicitly in `authorize` when a route requires login.
 
+`deny(config?)` is the hard-blocking complement of `authorize(check)`, which
+continues when its callback allows: `deny` rejects the request unconditionally,
+optionally only for matching requests through its `when` predicate.
+
+Compose `requireSession()` after `session(service)` to require a store-verified
+session rather than an anonymous one:
+
+```ts
+@use(session(sessions), requireSession())
+class AccountController {}
+
+// Optional identity refinement:
+// @use(session(sessions), requireSession((s) => typeof (s as any).userId === "number"))
+```
+
+Without a cookie, `session()` creates a new session; once the handler writes
+data the row is saved and the cookie is attached. `requireSession()` allows only
+a session whose signed cookie matches a store row that has not expired. Use it
+instead of `cookies("session")`, which only checks that a cookie is present and
+would accept a forged session ID. If a handler deletes the last session key, the
+row is deleted, the cookie is cleared, and later requests are anonymous again,
+so `requireSession()` denies them.
+
 ## Network and security controls
 
 | Guard | Use | Options and behavior |
@@ -144,6 +173,7 @@ there is no valid session cookie, so check an application identity such as
 | `cors(options)` | Cross-origin headers | `origin` accepts `"*"`, a string, a list, or a callback; also supports `allowHeaders`, `exposeHeaders`, `credentials`, and `maxAge`. It rejects a supplied origin when it is not allowed, then continues the pipeline (including for OPTIONS requests). |
 | `header(rules)` | Required/custom headers | Accepts one header name, a list of names, or a map of names to synchronous validators. |
 | `ipFilter(options)` | IP rules | `whitelist` and `blacklist` accept exact IPv4 addresses, IPv4 wildcard patterns, and IPv4 CIDR ranges. |
+| `deny(config?)` | Hard denial | Unconditionally denies the request with 403 "Forbidden" by default. Options are `code`, `message`, `headers`, `redirect`, and `when(ctx)` to deny only matching requests and let others continue, e.g. `deny({ when: (ctx) => ctx.req.method === "TRACE" })`. |
 | `rateLimit(options?)` | Request rate limiting | In-memory per-process counter keyed by IP, method, and path. Defaults: 100 requests per 60 seconds; can add rate and retry headers. |
 | `sanitize(options?)` | Parsed request values | Escapes HTML-sensitive characters in strings in `ctx.query`, `ctx.form`, `ctx.body`, and parsed JSON by default. A custom `sanitizeString` and per-area switches are available. Continue context-aware output encoding when rendering. |
 | `security(options?)` | Response security headers | Adds `nosniff`, `DENY`, and `strict-origin-when-cross-origin` by default. CSP and HSTS are opt-in; other headers can be set or disabled with `false`. |
@@ -160,6 +190,11 @@ app.use(ipFilter({ blacklist: ["203.0.113.7"] }));
 @use(validateUrl({ noDuplicates: true, maxQueryLength: 512 }))
 class SearchController {}
 ```
+
+`deny()` needs no configuration for a blanket block, but accepts a custom
+response such as `deny({ code: 503, message: "Under maintenance" })`. Add a
+`when` predicate to deny only part of the traffic, for example
+`deny({ when: (ctx) => ctx.req.method === "TRACE" })`.
 
 ### How `validateUrl()` checks a request
 

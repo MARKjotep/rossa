@@ -660,9 +660,18 @@ class Login extends Methods {
 
 `ServerSide` stores the session ID, data, and `isNew`, `isModified`,
 `isReadOnly`, and `isFound` flags behind a proxy. Without a valid session
-cookie, `session(service)` creates an anonymous session; check an application
-identity such as `ctx.session.userID` on protected routes. There is no
-`requireSession` guard.
+cookie, `session(service)` creates an anonymous session. Compose the official
+`requireSession()` guard after it to require a store-verified session on
+protected routes:
+
+```ts
+@use(session(sessions), requireSession())
+class AccountController {}
+```
+
+Anonymous, forged, unknown-ID, and expired sessions get `401`; an optional
+validator adds an identity check, for example
+`requireSession((s) => typeof (s as any).userID === "number")`.
 
 `AuthConfig` controls `COOKIE_NAME`, `COOKIE_LIFETIME`, `COOKIE_DOMAIN`,
 `COOKIE_PATH`, `COOKIE_HTTPONLY`, `COOKIE_SECURE`, `COOKIE_SAMESITE`,

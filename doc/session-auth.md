@@ -32,6 +32,32 @@ Use a long, private signing secret from your deployment secret store. Call
 its storage schema. Production applications should also choose cookie and
 expiration settings for their deployment.
 
+## Requiring a session
+
+`session(service)` loads or creates the session for every request; it does not
+require one. On protected routes, compose `requireSession()` after the session
+guard so only a store-backed session continues:
+
+```ts
+import { requireSession, session } from "rossa";
+
+app.use(session(sessions));
+
+@use(session(sessions), requireSession())
+class AccountController {}
+```
+
+Anonymous requests, forged or unknown session IDs, and expired sessions get
+`401 Authentication required` by default. An optional validator adds an
+application identity check, such as
+`requireSession((s) => typeof (s as any).userID === "number")`. Do not use
+`cookies("session")` for this: it only checks that a cookie is present and
+would accept a forged ID.
+
+The lifecycle also unwinds. Once the handler deletes the last session key,
+`deleteSession()` removes the row and clears the cookie, so later requests start
+anonymous and `requireSession()` denies them.
+
 ## SQLite auth service example
 
 This concrete service stores sessions in SQLite with Bun's SQL client. The

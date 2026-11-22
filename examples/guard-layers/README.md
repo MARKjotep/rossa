@@ -124,8 +124,9 @@ seeded in-memory user map, then persists the session and issues a readable
 5 attempts / 15s.
 
 **Why this order.** `session()` only loads the cookie; it never rejects an
-anonymous request. `requireSession()` is the explicit 401 assertion, so a
-missing cookie cannot silently become a CSRF failure. CSRF runs before body
+anonymous request. The framework `requireSession()` guard is the explicit 401
+assertion; this example passes a validator that also requires the `userId`
+written at login, so a missing cookie cannot silently become a CSRF failure. CSRF runs before body
 parsing because a cross-site write should be rejected without paying parse and
 validation cost. The schema then rejects malformed updates before they consume
 the small authenticated-write budget. The limiter runs last to protect the
