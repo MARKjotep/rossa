@@ -57,9 +57,13 @@ any `basePath`, with parameter colons removed (for example `["/users/id"]`).
 | `Encoding`       | `"br"`       | Response encoding; supports the `ContentEncodingType` values.                                             |
 
 `app.serve(serverOptions, websocketOptions)` starts Bun's server. The first
-argument accepts Bun serve options plus an optional `fn(port)` callback. The
-second argument accepts Bun WebSocket options plus Rossa's optional
-`messageRateLimit`. If no port is provided, Rossa uses `3000`.
+argument accepts Bun serve options plus an optional `fn(port, server)` ready
+callback. It runs after Bun binds the socket, so `port` is the actual bound port
+(including an OS-assigned ephemeral port when `port: 0`); the second argument is
+the bound `Bun.Server`. Without `fn`, the startup log prints the bound URL,
+including `https` when `tls` is set. The second argument accepts Bun WebSocket
+options plus Rossa's optional `messageRateLimit`. If no port is provided, Rossa
+uses `3000`.
 
 `app.test(request, encoding?)` runs a `Request` through the same pipeline
 without binding a socket. `app.registerWSS(...)` registers WebSocket
@@ -84,7 +88,9 @@ class Notes extends Methods {
 
 Rossa supplies an inherited `options` handler for each declared path. It
 returns `204` with an `Allow` header built from the methods registered for that
-path.
+path, including `OPTIONS`. OPTIONS on an undeclared path returns `404`, and a
+`HEAD` request without an implemented `head` handler also returns `404` — there
+is no automatic GET fallback.
 
 Useful response methods include `text`, `html`, `json`, `success`, `error`,
 `redirect`, `null`, `file`, and `fileServer`. Route parameters are exposed as
@@ -124,11 +130,31 @@ The public entry point exports guard factories for authentication
 (`authBearer`, `apiKey`, `auth`, `authorize`), caching (`smartCache`), content
 type, cookies, CORS, CSRF, error boundaries (`errorHandler`), headers, IP
 filtering, JSON body validation, required JSON keys (`keys`), JWT (`jwtAuth`,
-`jwtRefresh`), logging (`logger`, `loggerFN`), multipart and URL-encoded forms,
-query and form validation, rate limiting, sanitization, security headers,
-sessions, static files, timeouts, and URL validation. Define reusable custom
-guards with `createGuard`. See [`doc/guards.md`](doc/guards.md) for guard
-behavior and examples.
+`jwtRefresh`, `jwtRotate`), logging (`logger`, `loggerFN`), multipart and
+URL-encoded forms, query and form validation, rate limiting, sanitization,
+security headers, sessions, static files, timeouts, and URL validation. Define
+reusable custom guards with `createGuard`. See [`doc/guards.md`](doc/guards.md)
+for guard behavior and examples.
+
+Sessions accept the service or `{ auth, readonly }`, can be typed with
+`session<TData>()` plus `SessionContext<TData>`, and expose
+`ctx.session.rotate()` after login. JWT guards expose refresh claims in
+`ctx.data.jwtRefreshData`, reject refresh failures with `error_code`
+(`invalid`, `expired`, `reused`) and `WWW-Authenticate: Bearer`, and require
+`jwtAuth` before `jwtRefresh` on combined routes.
+
+### Rejection and response defaults
+
+- `security()` adds `Referrer-Policy: strict-origin-when-cross-origin`,
+  `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`. CSP, HSTS, and
+  the other policies are opt-in.
+- `sendError()` returns JSON `{ success: false, error }` and only the headers
+  you pass. **Behavior change:** it no longer adds
+  `Access-Control-Allow-Origin: *`; the `cors` guard owns CORS.
+- The `errorHandler()` guard returns a plain-text `500`
+  `Internal Server Error`, not JSON.
+- A per-call guard `code` overrides the factory default
+  (`createGuard(..., { code: 403 })(options, { code: 451 })` answers `451`).
 
 ## Static files
 
@@ -264,7 +290,10 @@ console.log(response.status, await response.text());
 `src/index.ts` exports `Rossa` and its option types; `Methods`, `RouterManager`,
 `route`, and `wss`; guard factories with `use` and `createGuard`; `ctx`, `Req`,
 `Res`, and `sendError`; WebSocket classes and `WSSMAN`; MCP (`McpController`,
-`McpServer`, `mcp`); authentication, database, and `Field`/`Scope` APIs. See
+`McpServer`, `mcp`); authentication (`JWTAuthService`, `JwtEngine`,
+`SessionAuthInterface`, `ServerSide`, and the session/JWT types), database, and
+`Field`/`Scope` APIs. `JWTAuthService.sign(payload, lifetimeSeconds?)` accepts a
+per-call lifetime; the lower-level `JwtEngine.signSeconds` is exported too. See
 [`doc/features.md`](doc/features.md) for names.
 
 ## Documentation and examples

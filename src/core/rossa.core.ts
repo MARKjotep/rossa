@@ -34,7 +34,16 @@ export interface dev {
 
 export interface serverOptions {
   server: Partial<Bun.Serve.Options<any, never>> &
-    dev & { fn?: (port: number) => void };
+    dev & {
+      /**
+       * Called after Bun has bound the server, so `port` is the port actually
+       * in use (including an OS-assigned ephemeral port when `port: 0`).
+       *
+       * The second argument is the bound `Bun.Server`; its `url` reflects the
+       * effective host, port, and `https` scheme when `tls` is set.
+       */
+      fn?: (port: number, server: Bun.Server<any>) => void;
+    };
   wss?: RossaWebSocketOptions | undefined;
 }
 
@@ -355,6 +364,19 @@ export class Rossa extends RouterManager {
   }
   // --- Main ---------------------------------------------------------------
 
+  /**
+   * Starts a Bun server for the app.
+   *
+   * Server options are passed directly (`port`, `hostname`, `tls`, ...). The
+   * returned `Bun.Server` is already bound. When `fn` is supplied it runs after
+   * binding and receives the bound port and server, so `port: 0` resolves to
+   * the OS-assigned port. Without `fn`, the startup log prints the bound URL
+   * (`server.url`), including `https` when `tls` is configured.
+   *
+   * @param server - Bun serve options plus the optional `fn` ready callback.
+   * @param wss - Optional WebSocket handler options and message rate limit.
+   * @returns The bound `Bun.Server` instance.
+   */
   serve(server: serverOptions["server"] = {}, wss: serverOptions["wss"] = {}) {
     const { fn, port, ..._server } = server;
     const { messageRateLimit, ...websocketOptions } = wss;
@@ -394,11 +416,15 @@ export class Rossa extends RouterManager {
       },
     });
 
+    const boundPort = SV.port ?? _port;
+
     if (ffn) {
-      ffn(_port);
+      // Report the bound endpoint, not the configured one: with `port: 0`
+      // Bun assigns the real port only after `Bun.serve` returns.
+      ffn(boundPort, SV);
     } else {
       const protocol = _server.tls ? "https" : "http";
-      log.i = `${protocol}://localhost:${SV.port ?? _port}`;
+      log.i = SV.url?.href ?? `${protocol}://localhost:${boundPort}`;
     }
 
     return SV;

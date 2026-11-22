@@ -269,14 +269,26 @@ describe("security and pipeline guards", () => {
     expect(tooLong.response.status).toBe(414);
   });
 
-  it("checks path traversal only in the pathname", async () => {
+  it("checks path traversal in the pathname and the decoded query string", async () => {
     const guard = validateUrl();
 
     const queryValue = await runGuard(
       guard,
       new Request("http://localhost/search?next=/../admin"),
     );
-    expect(queryValue.response.status).toBe(200);
+    expect(queryValue.response.status).toBe(400);
+
+    const encodedQuery = await runGuard(
+      guard,
+      new Request("http://localhost/search?x=%2e%2e%2fetc"),
+    );
+    expect(encodedQuery.response.status).toBe(400);
+
+    const optOut = await runGuard(
+      validateUrl({ sanitizePaths: false }),
+      new Request("http://localhost/search?next=/../admin"),
+    );
+    expect(optOut.response.status).toBe(200);
 
     const encodedPath = await runGuard(
       guard,

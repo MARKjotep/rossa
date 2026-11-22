@@ -1,16 +1,16 @@
-import { ServerSide } from "./server-side";
+import { ServerSide, type SessionInstance } from "./server-side";
 import { SidGenerator } from "./sid-generator";
 
 export interface AuthConfig {
   COOKIE_NAME?: string;
-  COOKIE_LIFETIME?: number; // Days
+  COOKIE_LIFETIME?: number; // Days (fractional values are honoured to the millisecond)
   COOKIE_DOMAIN?: string | undefined;
   COOKIE_PATH?: string;
   COOKIE_HTTPONLY?: boolean;
   COOKIE_SECURE?: boolean;
   COOKIE_SAMESITE?: "Strict" | "Lax" | "None";
   MAX_COOKIE_SIZE?: number;
-  SESSION_LIFETIME?: number;
+  SESSION_LIFETIME?: number; // Days (fractional values are honoured to the millisecond)
 }
 
 type newSession = {
@@ -19,7 +19,18 @@ type newSession = {
   isFound?: boolean;
 };
 
-export abstract class SessionAuthInterface extends SidGenerator {
+const DAY_IN_MILLISECONDS = 86_400_000;
+
+/**
+ * Abstract session service: signing, cookie serialization, expiration, and
+ * identifier rotation. Subclasses implement the storage hooks.
+ *
+ * @typeParam TData - Shape of the data stored on the session. It types the
+ * resolved session (see {@link SessionInstance}) without casts.
+ */
+export abstract class SessionAuthInterface<
+  TData extends Record<string, any> = Record<string, any>,
+> extends SidGenerator {
   public config: Required<AuthConfig>;
   constructor(config: AuthConfig, salt?: string) {
     super(salt ?? "salty");
@@ -59,7 +70,7 @@ export abstract class SessionAuthInterface extends SidGenerator {
   public async openSession(
     sid?: string,
     readonly: boolean = false,
-  ): Promise<ServerSide> {
+  ): Promise<SessionInstance<TData>> {
     // If the SID exists and passes signature validation, fetch it from DB!
     if (sid && this.signer.unsign(sid)) {
       return await this.fetchSession(sid, readonly);
@@ -69,15 +80,19 @@ export abstract class SessionAuthInterface extends SidGenerator {
   }
 
   /** To be implemented by child class: Retrieve from DB */
-  public async fetchSession(sid: string, readonly?: boolean) {
+  public async fetchSession(
+    sid: string,
+    readonly?: boolean,
+  ): Promise<SessionInstance<TData>> {
     try {
       const row = await this.fetchData(sid);
 
       if (row) {
-        const initialData = row.data ?? {};
+        const initialData = (row.data ?? {}) as Partial<TData>;
         if (this.isNotExpired(new Date(row.expiration))) {
-          return new ServerSide(sid, initialData, readonly, false, true)
-            .session;
+          return this.materialize(
+            new ServerSide<TData>(sid, initialData, readonly, false, true),
+          );
         }
         return this.new({ sid, isFound: true, readonly });
       }
@@ -116,31 +131,97 @@ export abstract class SessionAuthInterface extends SidGenerator {
     sid,
     isFound = false,
     readonly = false,
-  }: newSession): ServerSide {
-    return new ServerSide(sid ?? this.generate(), {}, readonly, true, isFound)
-      .session;
+  }: newSession): SessionInstance<TData> {
+    return this.materialize(
+      new ServerSide<TData>(sid ?? this.generate(), {}, readonly, true, isFound),
+    );
   }
 
   /** Instantiates a read-only session */
-  public get readonly(): ServerSide {
-    return new ServerSide(this.generate(), {}, true).session;
+  public get readonly(): SessionInstance<TData> {
+    return this.materialize(new ServerSide<TData>(this.generate(), {}, true));
+  }
+
+  /**
+   * Attaches the rotation hook and exposes the proxy that merges the
+   * framework API with the session data.
+   */
+  protected materialize(session: ServerSide<TData>): SessionInstance<TData> {
+    session.setRotator(() => this.rotateSession(session));
+    return session.session;
+  }
+
+  /**
+   * Mints a new signed `sid` for the session and deletes the previous row.
+   *
+   * The guard persists the new row (and sends its cookie) after the handler
+   * returns because the session is marked modified. Used by
+   * {@link ServerSide.rotate}; call that instead of this method directly.
+   *
+   * @param session - Session to re-key. Must not be readonly.
+   */
+  public async rotateSession(session: ServerSide<TData>): Promise<void> {
+    if (session.isReadOnly) {
+      console.warn("session: readonly");
+      return;
+    }
+
+    const previousSid = session.sid;
+
+    if (previousSid && session.isFound) {
+      await this.removeStoredSession(previousSid);
+    }
+
+    session.renewSid(this.generate());
+    session.isNew = false;
+    session.isFound = true;
+    session.isModified = true;
+  }
+
+  /**
+   * Deletes a stored row without emitting a cookie for the new session.
+   * A store that fails after deleting the row (for example while serializing
+   * the removal cookie) is still treated as successful.
+   */
+  private async removeStoredSession(sid: string): Promise<void> {
+    const stale = new ServerSide<TData>(sid, {}, false, false, true);
+
+    try {
+      await this.deleteSession(stale, new Headers());
+    } catch (error) {
+      let stillStored = true;
+
+      try {
+        stillStored = Boolean(await this.fetchData(sid));
+      } catch {
+        stillStored = true;
+      }
+
+      if (stillStored) throw error;
+    }
   }
 
   /**
    * Calculates the exact Date object when this session expires.
+   *
+   * Fractional-day lifetimes are preserved: computation is performed in
+   * milliseconds instead of truncating through `Date#setDate`.
    */
   public get getSessionExpirationDate(): Date {
-    const now = new Date();
-    const lifetimeDays = this.config.SESSION_LIFETIME;
-    now.setDate(now.getDate() + lifetimeDays);
-    return now;
+    return new Date(
+      Date.now() + this.config.SESSION_LIFETIME * DAY_IN_MILLISECONDS,
+    );
   }
 
+  /**
+   * Calculates the exact Date object when the session cookie expires.
+   *
+   * Fractional-day lifetimes are preserved to the millisecond.
+   */
   public get getCookieExpirationDate(): Date {
-    const now = new Date();
-    const lifetimeDays = this.config.COOKIE_LIFETIME;
-    now.setDate(now.getDate() + lifetimeDays);
-    return now;
+    return new Date(
+      Date.now() + this.config.COOKIE_LIFETIME * DAY_IN_MILLISECONDS,
+    );
   }
 
   /**
@@ -230,7 +311,7 @@ export abstract class SessionAuthInterface extends SidGenerator {
   public async loadHeader(
     req: Request,
     readonly: boolean = false,
-  ): Promise<[string | undefined, ServerSide]> {
+  ): Promise<[string | undefined, SessionInstance<TData>]> {
     const cookieHeader = req.headers.get("cookie");
 
     if (cookieHeader) {

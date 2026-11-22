@@ -72,12 +72,21 @@ export const sanitize = createGuard<SanitizeOptions>(
       ctx.form = sanitizeValue(ctx.form, sanitizeString) as typeof ctx.form;
     }
     if (options?.body !== false) {
-      if (ctx.body !== undefined) {
-        ctx.body = sanitizeValue(ctx.body, sanitizeString) as typeof ctx.body;
-      }
       const parsedJson = ctx.req["_json"];
-      if (parsedJson !== undefined) {
-        ctx.req["_json"] = sanitizeValue(parsedJson, sanitizeString);
+
+      // `json()` writes the same object to both fields; sanitize once so the
+      // two views stay identical instead of diverging into separate copies.
+      if (ctx.body !== undefined && ctx.body === parsedJson) {
+        const sanitized = sanitizeValue(ctx.body, sanitizeString);
+        ctx.body = sanitized as typeof ctx.body;
+        ctx.req["_json"] = sanitized;
+      } else {
+        if (ctx.body !== undefined) {
+          ctx.body = sanitizeValue(ctx.body, sanitizeString) as typeof ctx.body;
+        }
+        if (parsedJson !== undefined) {
+          ctx.req["_json"] = sanitizeValue(parsedJson, sanitizeString);
+        }
       }
     }
 

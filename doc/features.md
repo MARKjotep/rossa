@@ -89,7 +89,16 @@ app.serve({ hostname: "0.0.0.0", port: 3000 });
 | `app.test(request, encoding?)` | Run a `Request` through the same pipeline without binding a socket. Returns a `Response`.                     |
 | `app.getPaths()`               | Return registered HTTP paths with parameter colons removed.                                                   |
 
-`serverOptions` accepts Bun serve options plus an optional `fn(port)` callback.
+`serverOptions` accepts Bun serve options plus an optional `fn(port, server)`
+ready callback. It runs after Bun binds the socket, so `port` is the port
+actually in use — with `port: 0` that is the OS-assigned port — and the second
+argument is the bound `Bun.Server`. Without `fn`, the startup log prints the
+bound URL (`server.url`), including `https` when `tls` is set.
+
+**Behavior change:** the callback now receives the bound endpoint rather than
+the configured port, and the log shows the bound URL instead of a hard-coded
+`localhost`. Existing `(port) => …` callbacks keep working.
+
 `websocketOptions` accepts Bun WebSocket handler options plus Rossa's
 `messageRateLimit`. TLS configuration is passed through Bun's `tls` option:
 
@@ -152,8 +161,16 @@ app.register(Users);
 
 `Methods` supplies an inherited `options` handler. Every declared path accepts
 OPTIONS and returns an empty `204` response with an `Allow` header built from the
-methods registered for that path, including OPTIONS. OPTIONS to an undeclared
-path still returns `404`. Override `options` to customize the response.
+methods registered for that path, including OPTIONS. Override `options` to
+customize the response.
+
+| Request | Result |
+| --- | --- |
+| OPTIONS on a declared path | `204`, empty body, `Allow: <declared methods + OPTIONS>` |
+| OPTIONS on an undeclared path | `404` |
+| HEAD with a `head` handler | That handler's response; HTTP suppresses the body |
+| HEAD without a `head` handler | `404` — there is no automatic GET fallback |
+| Any method with no handler on a declared path | `404` |
 
 CORS preflight behavior is controlled by the CORS guard; the inherited OPTIONS
 handler only advertises allowed methods.
@@ -195,13 +212,13 @@ after the global pipeline.
 | `auth(checks)`              | Takes a map of header names to validators; every listed header must be present and pass.                              |
 | `authorize(check)`          | Runs a sync or async policy callback with `ctx`. Returns `403` when it denies access. Use after authentication.       |
 | `cookies(name)`             | Requires the named cookie to exist; returns `401` when missing. Read the value with `ctx.req.cookies.get(name)`.      |
-| `json(schema)`              | Checks content type and a 1 MiB default limit on POST/PUT/PATCH, parses JSON, validates it, and stores it in `ctx.req._json`. |
+| `json(schema)`              | Checks content type and a 1 MiB default limit on POST/PUT/PATCH, parses JSON, validates it, and stores it in both `ctx.body` and `ctx.req._json`. |
 | `keys(names)`               | Parses JSON, checks required top-level keys, then stores the body in `ctx.body`. Does not validate field types.       |
-| `multipart()`               | Parses `multipart/form-data` into `ctx.form`. Uploads stay `File` objects; repeated names become arrays.              |
-| `urlencoded()`              | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays.                             |
+| `multipart()`               | Parses `multipart/form-data` into `ctx.form`. Uploads stay `File` objects with their declared MIME type; repeated names become arrays. |
+| `urlencoded()`              | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. `{ strict: true }` rejects malformed percent escapes and NUL bytes. |
 | `validateQuery(schema)`     | Coerces and validates query values into `ctx.query`. Duplicate names keep the last value.                             |
 | `validateForm(schema)`      | Parses and validates form values into `ctx.form`. Duplicate names keep the last value.                                |
-| `validateUrl(options?)`     | Checks URL and query length, duplicate or disallowed keys, value patterns, malformed escapes, null bytes, and traversal. |
+| `validateUrl(options?)`     | Checks URL and query length, duplicate or disallowed keys, value patterns, malformed escapes, null bytes, and traversal in the pathname and decoded query string. |
 | `contentType(rule)`         | Accepts a MIME type, a list, or a sync predicate. Parameters such as `charset` are ignored.                            |
 | `cors(options)`             | Applies CORS headers and validates origins. Supports `origin`, `allowHeaders`, `exposeHeaders`, `credentials`, and `maxAge`. |
 | `csrf(options?)`            | Compares a header (default `x-csrf-token`) with the `csrf_token` cookie on POST, PUT, PATCH, and DELETE.               |
@@ -209,16 +226,17 @@ after the global pipeline.
 | `ipFilter(options)`         | Applies `whitelist` and `blacklist` rules for IPv4 addresses, wildcard patterns, and CIDR ranges.                     |
 | `rateLimit(options?)`       | In-memory fixed-window request limit keyed by IP, method, and path. Defaults: 100 requests per 60 seconds.            |
 | `sanitize(options?)`        | Escapes HTML-sensitive characters in parsed query, form, body, and JSON values.                                       |
-| `security(options?)`        | Adds response security headers. `nosniff`, `DENY`, and `strict-origin-when-cross-origin` are on by default.           |
-| `jwtAuth(service)`          | Verifies an access token and stores claims in `ctx.jwtData`.                                                          |
-| `jwtRefresh(service)`       | Reads `x-refresh-token`, consumes it, issues a replacement pair in `ctx.data.jwtTokens`, and stores claims.           |
-| `session(service)`          | Loads `ctx.session`, runs downstream work, then persists or deletes changes. Creates an anonymous session when none exists. |
+| `security(options?)`        | Adds `Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY` by default. CSP, HSTS, and the other policies are opt-in. |
+| `jwtAuth(service)`          | Verifies an access token and stores claims in `ctx.jwtData`; rejections are `401` with `WWW-Authenticate: Bearer`.    |
+| `jwtRefresh(service)`       | Reads `x-refresh-token`, claims it once, issues a replacement pair in `ctx.data.jwtTokens`, and stores refresh claims in `ctx.data.jwtRefreshData`. Mount after `jwtAuth`. |
+| `jwtRotate(service)`        | Verifies an access token when present, then claims the refresh token and issues a replacement pair. Use alone for a rotation endpoint. |
+| `session(service)`          | Loads `ctx.session`, runs downstream work, then persists or deletes changes. Accepts `{ auth, readonly }` and a typed data parameter; creates an anonymous session when none exists. |
 | `smartCache({ ttlMs })`     | In-memory GET response cache keyed by full URL. Requests with cookies, authorization, or range headers bypass it. Use only for public responses. |
 | `staticFiles()`             | Serves GET and HEAD requests for recognized file paths through the static file server.                               |
 | `logger(label?)`            | Logs method, path, and timestamp before downstream work.                                                             |
 | `loggerFN(formatter)`       | Calls a formatter after downstream work and logs a truthy result.                                                     |
 | `timeout(milliseconds)`     | Stops waiting after the limit and returns `408`. It cannot cancel work already running.                               |
-| `errorHandler(options?)`    | Catches thrown errors from downstream guards and handlers; returns a generic `500` unless `onError` is supplied.      |
+| `errorHandler(options?)`    | Catches thrown errors from downstream guards and handlers; returns a plain-text `500` `Internal Server Error` unless `message` or `onError` is supplied. |
 
 `schema` values are built with the zod-style `z` API: `z.object({ ... })`,
 `z.string()`, `z.number()`, `z.boolean()`, and `z.array(item)`, with `min`,
@@ -255,9 +273,30 @@ app.use(requireTenant({ allowedIds: ["tenant-123"] }));
 class TenantController {}
 ```
 
-The per-use second argument can override `message`, `headers`, or `redirect`.
-The status code is taken from the default configuration passed to
-`createGuard`.
+The per-use second argument can override any error field, including `code`,
+`message`, `headers`, or `redirect`. Omitted fields keep the factory default;
+`code` finally falls back to `400`, and `headers` are shallow-merged.
+
+**Behavior change:** a per-call `code` now wins over the factory default
+(`requireTenant(options, { code: 451 })` answers `451`). Before this, the status
+always came from the `createGuard` defaults, and `BaseConfig` did not accept
+`code`.
+
+### Rejection shapes
+
+`sendError(config)` returns `application/json` with `{ success: false, error }`
+and only the headers supplied in `config.headers`, plus `Content-Type` and
+`Location` where applicable. **Behavior change:** it no longer adds
+`Access-Control-Allow-Origin: *`; every guard rejection used to advertise a
+wildcard CORS grant. The `cors` guard owns CORS now — mount it before the guards
+whose rejections a browser must read, or pass an explicit
+`Access-Control-Allow-Origin` header for one response.
+
+The `errorHandler()` guard returns a plain-text `500` (`text/plain;
+charset=utf-8`, body `Internal Server Error`) rather than JSON; without the
+guard, the core pipeline boundary returns an empty `500`. See
+[`doc/guards.md`](guards.md#rejection-and-framework-response-shapes) for the
+stable OPTIONS/HEAD matrix and the default `security()` header set.
 
 ## Request context and responses
 
@@ -273,9 +312,9 @@ Each request receives a `ctx` instance with:
 | `method`          | Resolved method, including the internal `EVENT` method for SSE requests.                     |
 | `methods`         | Methods registered for the matched route, used by the inherited OPTIONS handler.              |
 | `data`            | Request-local record for guard and handler values.                                           |
-| `jwtData`         | Claims populated by JWT guards.                                                              |
-| `session`         | Session proxy populated by `session(service)`.                                               |
-| `body`            | Body populated by `keys(names)`.                                                             |
+| `jwtData`         | Access claims populated by JWT guards; refresh claims live in `data.jwtRefreshData`.          |
+| `session`         | Session proxy populated by `session(service)`; type it with `SessionContext<TData>`.         |
+| `body`            | Parsed body populated by `keys(names)` and `json(schema)`; also mirrored to `req._json`.     |
 | `form`            | Parsed form values populated by form guards.                                                 |
 | `query`           | Validated query values populated by `validateQuery()`.                                       |
 | `headr`           | Header builder (`Heder`) for assembling response headers.                                    |
@@ -673,6 +712,44 @@ Anonymous, forged, unknown-ID, and expired sessions get `401`; an optional
 validator adds an identity check, for example
 `requireSession((s) => typeof (s as any).userID === "number")`.
 
+`session()` accepts either the service or a mount object. A readonly mount
+loads the session read-only, discards writes, and skips persistence:
+
+```ts
+app.use(session({ auth: sessions, readonly: true }));
+```
+
+Pass the stored data shape as a type parameter and annotate handlers with
+`SessionContext<TData>` to read it without casts:
+
+```ts
+interface AccountSession {
+  userId: string;
+}
+
+app.use(session<AccountSession>(sessions));
+
+@route("/profile")
+class Profile extends Methods {
+  get(ctx: SessionContext<AccountSession>) {
+    return ctx.res.json({ userId: ctx.session?.userId });
+  }
+}
+```
+
+Call `await ctx.session!.rotate()` after a successful login to re-key the
+session. The previous row is deleted and a new signed `sid` is minted
+immediately; the guard persists the new row and cookie after the handler
+returns, so rotate on the success path only. A readonly mount ignores rotation
+with a warning.
+
+`SESSION_LIFETIME` and `COOKIE_LIFETIME` are measured in days and fractional
+values are honoured to the millisecond (`0.5` is twelve hours). The guard
+serializes the cookie before persisting: a `MAX_COOKIE_SIZE` overflow answers
+with a JSON `500` and leaves no row behind. **Behavior change:** previously the
+row could be written before cookie serialization failed, leaving an orphaned
+session.
+
 `AuthConfig` controls `COOKIE_NAME`, `COOKIE_LIFETIME`, `COOKIE_DOMAIN`,
 `COOKIE_PATH`, `COOKIE_HTTPONLY`, `COOKIE_SECURE`, `COOKIE_SAMESITE`,
 `MAX_COOKIE_SIZE`, and `SESSION_LIFETIME`.
@@ -692,18 +769,20 @@ const jwt = new JWTAuthService(
       // Persist until expiresAt (Unix milliseconds).
     },
     consume: async (token) => {
-      // Atomically remove the token; return true only for the winning caller.
+      // Atomically claim the token; return true only for the winning caller.
       return true;
+    },
+    deleteExpired: async (before) => {
+      // Optional cleanup: remove rows expired before `before` (Unix ms).
+      return 0;
     },
   },
   process.env.JWT_SECRET!,
   { tokenValidity: 15, refreshValidity: 7 },
 );
 
-app.use(jwtAuth(jwt));
-
 @route("/refresh")
-@use(jwtRefresh(jwt))
+@use(jwtAuth(jwt), jwtRefresh(jwt))
 class Refresh extends Methods {
   post({ data, res }: ctx) {
     return res.json({ tokens: data.jwtTokens });
@@ -711,11 +790,36 @@ class Refresh extends Methods {
 }
 ```
 
-The store's `consume()` must be atomic to prevent concurrent reuse. Access
-tokens default to 15 minutes and refresh tokens to 7 days. `jwtAuth` stores
-verified claims in `ctx.jwtData`; `jwtRefresh` reads `x-refresh-token`,
-consumes it, and issues a replacement pair. See
-[`doc/session-auth.md`](session-auth.md) for an SQLite-backed session service.
+The store's `consume()` must be atomic. It is a claim-once contract: the winning
+caller gets `true`, every later call gets `false`. The store may delete the row
+or keep it with a `consumed_at` stamp; keeping the audit trail is allowed, only
+the boolean result matters. Access tokens default to 15 minutes and refresh
+tokens to 7 days.
+
+Mount `jwtAuth` before `jwtRefresh` on a combined route. `jwtAuth` stores access
+claims in `ctx.jwtData`; `jwtRefresh` keeps refresh claims in
+`ctx.data.jwtRefreshData`, leaves `ctx.jwtData` alone when it is already
+populated (refresh claims also populate `ctx.jwtData` when no access claims
+exist), and issues the replacement pair into `ctx.data.jwtTokens`. When an
+`Authorization` header is present, `jwtRefresh` verifies it before claiming the
+refresh token, so a failed access check does not burn the token. For a single
+rotation endpoint use `jwtRotate(jwt)`; it accepts an optional access token and
+performs both steps.
+
+Refresh failures answer `401` with the guard's message, a `WWW-Authenticate:
+Bearer` header, and an `error_code` of `"invalid"`, `"expired"`, or `"reused"`.
+`"reused"` means a validly signed token is no longer available in the store.
+`JWTAuthService.consumeWithReason()` reports the same distinction;
+`consume()` keeps returning claims or `null`.
+
+Call `sign(payload, lifetimeSeconds)` for a per-call access-token lifetime; the
+second argument is in seconds and overrides the minute-based `tokenValidity` for
+that token only. `JWTAuthService.deleteExpired(before?)` forwards to the store's
+optional `deleteExpired(before)`, which defaults to now; a store without the hook
+is a no-op.
+
+See [`doc/session-auth.md`](session-auth.md) for an SQLite-backed session
+service.
 
 ## Database layer
 

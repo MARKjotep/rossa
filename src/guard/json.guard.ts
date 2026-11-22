@@ -8,7 +8,10 @@ export const DEFAULT_MAX_SIZE = 1 * 1024 * 1024; // Default 1 MB limit
 
 /**
  * Parses and validates JSON request bodies for POST, PUT, and PATCH requests.
- * The validated value is stored on the request as `_json`.
+ *
+ * The validated value is stored on `ctx.body` (the same field populated by
+ * `keys([...])`) and, for backwards compatibility, on the request as `_json`.
+ * Handlers should read `ctx.body`; `ctx.req._json` remains supported.
  *
  * @param schema - Schema used to validate the parsed JSON object.
  * @returns A guard factory that accepts a schema and optional error config.
@@ -118,6 +121,7 @@ export const json = createGuard<AnySchema>(
     }
 
     ctx.req["_json"] = result.data;
+    ctx.body = result.data;
 
     return await next();
   },

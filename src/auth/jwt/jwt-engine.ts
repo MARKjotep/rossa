@@ -16,6 +16,11 @@ export type JwtPayload<T> = T & {
   jti?: string;
 };
 
+/** Result of inspecting a token without throwing. */
+export type JwtInspection<T> =
+  | { ok: true; payload: JwtPayload<T> }
+  | { ok: false; reason: "invalid" | "expired" };
+
 export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
   private readonly secretKey: Buffer;
 
@@ -40,13 +45,34 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
       );
     }
 
+    return this.build(payload, expiresInMinutes * 60);
+  }
+
+  /**
+   * Generates a signed token with a lifetime expressed in seconds.
+   *
+   * Use this for sub-minute lifetimes (tests, short-lived one-off tokens)
+   * without changing the service's minute-based default.
+   */
+  public signSeconds(payload: T, expiresInSeconds: number): string {
+    if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
+      throw new RangeError(
+        "Token lifetime must be a positive number of seconds.",
+      );
+    }
+
+    return this.build(payload, expiresInSeconds);
+  }
+
+  /** Shared token builder; `lifetimeSeconds` is added to the current `iat`. */
+  private build(payload: T, lifetimeSeconds: number): string {
     const header = { alg: "HS256", typ: "JWT" };
     const now = Math.floor(Date.now() / 1000);
 
     const fullPayload: JwtPayload<T> = {
       ...payload,
       iat: now,
-      exp: now + expiresInMinutes * 60,
+      exp: now + lifetimeSeconds,
       // Assigned after the spread: when rotation re-issues consumed refresh
       // claims, the previous `jti` must never carry over.
       jti: randomUUID(),
@@ -68,12 +94,15 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
   }
 
   /**
-   * Verifies the JWT mathematically. Returns payload if valid, or null if expired/tampered.
+   * Verifies the JWT mathematically and reports why an unusable token failed.
+   *
+   * Signature and shape failures are `"invalid"`; a valid signature whose
+   * `exp` has passed is `"expired"`. Never throws.
    */
-  public verify(token: string): JwtPayload<T> | null {
+  public inspect(token: string): JwtInspection<T> {
     try {
       const parts = token.split(".");
-      if (parts.length !== 3) return null;
+      if (parts.length !== 3) return { ok: false, reason: "invalid" };
 
       const [encodedHeader, encodedPayload, providedSignature] = parts;
       const unsignedToken = `${encodedHeader}.${encodedPayload}`;
@@ -88,7 +117,7 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
         header.alg !== "HS256" ||
         header.typ !== "JWT"
       )
-        return null;
+        return { ok: false, reason: "invalid" };
 
       // 2. Cryptographic Signature Verification (Timing Safe)
       const expectedSignature = createHmac("sha256", this.secretKey)
@@ -102,10 +131,10 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
         expectedBuffer.length !== providedBuffer.length ||
         !timingSafeEqual(expectedBuffer, providedBuffer)
       ) {
-        return null;
+        return { ok: false, reason: "invalid" };
       }
 
-      // 3. Expiration Check
+      // 3. Payload / Expiration Check
       const payload: JwtPayload<T> = JSON.parse(
         Buffer.from(encodedPayload || "", "base64url").toString("utf8"),
       );
@@ -115,18 +144,27 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
         !Number.isFinite(payload.iat) ||
         !Number.isFinite(payload.exp)
       )
-        return null;
+        return { ok: false, reason: "invalid" };
+
       const now = Math.floor(Date.now() / 1000);
 
       if (payload.exp <= now) {
-        return null;
+        return { ok: false, reason: "expired" };
       }
 
-      return payload;
+      return { ok: true, payload };
     } catch {
       // Handles invalid base64 or malformed JSON payloads safely
-      return null;
+      return { ok: false, reason: "invalid" };
     }
+  }
+
+  /**
+   * Verifies the JWT mathematically. Returns payload if valid, or null if expired/tampered.
+   */
+  public verify(token: string): JwtPayload<T> | null {
+    const inspection = this.inspect(token);
+    return inspection.ok ? inspection.payload : null;
   }
 
   // --- Refresh Token Methods ---
@@ -138,7 +176,6 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
    * which is what makes rotation + single-use stores replay-safe.
    */
   public issue(data: T, daysValid: number = 7): string {
-    const minutesValid = daysValid * 24 * 60;
-    return this.sign(data, minutesValid);
+    return this.signSeconds(data, daysValid * 24 * 60 * 60);
   }
 }

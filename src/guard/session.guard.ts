@@ -1,49 +1,170 @@
 import type { SessionAuthInterface } from "@/auth/session/auth-interface";
-import type { ServerSide } from "@/auth/session/server-side";
+import type {
+  ServerSide,
+  SessionInstance,
+} from "@/auth/session/server-side";
+
+export type { SessionInstance } from "@/auth/session/server-side";
 import { sendError } from "@/http/res";
+import type { BaseConfig, GuardReturnType } from "./@/base.guard";
 import { createGuard } from "./@/base.guard";
 
-export interface SessionConfig {
-  auth: SessionAuthInterface;
+/**
+ * Object form accepted by {@link session}. A readonly mount loads the session
+ * without letting handlers mutate or persist it.
+ */
+export interface SessionMount<
+  TData extends Record<string, any> = Record<string, any>,
+> {
+  /** Session service used to load, save, and delete sessions. */
+  auth: SessionAuthInterface<TData>;
+  /** Discard handler writes and skip persistence. Defaults to `false`. */
   readonly?: boolean;
 }
+
+/**
+ * Legacy name for {@link SessionMount}; kept so existing imports keep
+ * compiling.
+ */
+export type SessionConfig = SessionMount;
+
+/** A session guard with its data shape attached for editor hints. */
+export type SessionGuard<TData extends Record<string, any>> =
+  GuardReturnType & {
+    /** Phantom marker: the session data shape mounted by this guard. */
+    readonly __sessionData?: TData;
+  };
+
+type NormalizedMount = {
+  auth: SessionAuthInterface<any>;
+  readonly: boolean;
+};
+
+function isMount(value: unknown): value is SessionMount<any> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "auth" in value &&
+    Boolean((value as SessionMount<any>).auth)
+  );
+}
+
+const sessionGuard = createGuard<NormalizedMount>(
+  async (ctx, next, mount, errorConfig) => {
+    const { auth, readonly } = mount;
+
+    // Readonly mounts load the session in read-only mode: the proxy rejects
+    // writes and the guard never persists.
+    const [sid, loaded] = await auth.loadHeader(ctx.req.request, readonly);
+
+    ctx.session = loaded;
+    const current = loaded;
+
+    const response = await next();
+
+    if (current.isReadOnly) return response;
+
+    const shouldDelete =
+      current.length === 0 &&
+      (current.isNew ? Boolean(sid) : current.isModified);
+    const shouldSave =
+      !shouldDelete && current.length > 0 && current.isModified;
+
+    if (!shouldDelete && !shouldSave) return response;
+
+    // Serialize the cookie before touching the store. A MAX_COOKIE_SIZE
+    // overflow therefore answers with a normal JSON error instead of
+    // persisting an orphan row and failing later in the post-handler save.
+    if (shouldSave && typeof auth.buildCookieString === "function") {
+      try {
+        auth.buildCookieString(current);
+      } catch (error) {
+        console.error(
+          "[session] Refusing to persist a session whose cookie cannot be serialized:",
+          error,
+        );
+        return sendError(errorConfig);
+      }
+    }
+
+    try {
+      if (shouldDelete) {
+        await auth.deleteSession(current, response.headers);
+      } else {
+        await auth.saveSession(current, response.headers);
+      }
+    } catch (error) {
+      // A store may insert before serializing its own cookie. Only a brand-new
+      // row can be an orphan, so remove it when persistence itself failed.
+      if (shouldSave && !current.isFound) {
+        try {
+          await auth.deleteSession(current, new Headers());
+        } catch {
+          // Rollback is best effort; the original failure is reported below.
+        }
+      }
+
+      console.error("[session] Failed to persist the request session:", error);
+      return sendError(errorConfig);
+    }
+
+    return response;
+  },
+  {
+    id: "session-manager",
+    code: 500,
+    message: "Internal Server Error",
+  },
+);
 
 /**
  * Loads the request session into `ctx.session` and persists session changes
  * after downstream guards and handlers complete.
  *
- * @param auth - Session service used to load, save, and delete sessions.
- * @returns A guard factory that accepts a session service and optional error config.
+ * Accepts a session service directly (the original form) or a mount object
+ * with a readonly switch:
+ *
+ * ```ts
+ * @use(session(sessions))                     // writable
+ * @use(session({ auth: sessions, readonly: true })) // discard writes
+ * @use(session<AccountSession>(sessions))     // typed ctx.session data
+ * ```
+ *
+ * Type the handler context with {@link SessionContext} (or read the session
+ * from the generic mount) to avoid casting `ctx.session` data properties.
+ *
+ * @param mount - Session service, or `{ auth, readonly? }`.
+ * @param overrideConfig - Optional error configuration for persistence errors.
+ * @returns A guard that loads, exposes, and persists the request session.
  */
-export const session = createGuard<SessionAuthInterface>(
-  async (ctx, next, auth, errorConfig) => {
-    // The framework uses the blueprint to parse the request...
-    const [_sid, _session] = await auth.loadHeader(ctx.req.request);
+export function session<TData extends Record<string, any> = Record<string, any>>(
+  mount: SessionAuthInterface<any> | SessionMount<any>,
+  overrideConfig: BaseConfig = {},
+): SessionGuard<TData> {
+  const normalized: NormalizedMount = isMount(mount)
+    ? { auth: mount.auth, readonly: mount.readonly ?? false }
+    : { auth: mount, readonly: false };
 
-    ctx.session = _session;
+  return sessionGuard(normalized, overrideConfig);
+}
 
-    const response = await next();
-
-    if (!ctx.session.isReadOnly) {
-      if (!ctx.session.length) {
-        if (ctx.session.isNew) {
-          if (_sid) {
-            await auth.deleteSession(ctx.session, response.headers);
-          }
-        } else {
-          if (ctx.session.isModified) {
-            await auth.deleteSession(ctx.session, response.headers);
-          }
-        }
-      } else if (ctx.session.isModified) {
-        await auth.saveSession(ctx.session, response.headers);
-      }
-    }
-
-    return response;
-  },
-  { id: "session-manager" },
-);
+/**
+ * A `ctx` whose `session` is typed with the mounted session data.
+ *
+ * ```ts
+ * import type { SessionContext } from "rossa";
+ *
+ * async post(ctx: SessionContext<AccountSession>) {
+ *   ctx.session?.email; // string — no cast
+ * }
+ * ```
+ */
+export type SessionContext<
+  TData extends Record<string, any> = Record<string, any>,
+> = import("@/http/ctx").ctx<
+  Record<string, string>,
+  import("@/auth/session/server-side").SessionInstance<TData>
+>;
 
 /** Optional extra check applied to a session that `session()` already resolved. */
 export type SessionValidator = (

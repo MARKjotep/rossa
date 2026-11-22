@@ -1,10 +1,17 @@
 import type { ctx } from "../ctx";
 
 export type ErrorConfig = {
+  /** HTTP status code used for the response. @default 400 */
   code?: number | undefined;
+  /** Message returned in the JSON `error` field; defaults to the status text. */
   message?: string | undefined;
+  /** Redirect target; when set the guard answers `302` instead of an error body. */
   redirect?: string | undefined;
-  // maxSize?: number | undefined;
+  /**
+   * Extra response headers merged into the response as-is. CORS headers are
+   * **not** added automatically: pass `Access-Control-Allow-Origin` here (or
+   * mount `cors`) when a browser must read the error response.
+   */
   headers?: Record<string, string> | undefined;
   error?: (ctx: ctx) => Response;
   maxSize?: number | undefined;
@@ -25,12 +32,23 @@ const STATUS_MESSAGES: Record<number, string> = {
   503: "Service Unavailable",
 };
 
+/**
+ * Builds a JSON error response (`{ success: false, error, details? }`).
+ *
+ * Only headers supplied through `config.headers` are emitted (plus
+ * `Content-Type`/`Location`); CORS headers are intentionally left to the `cors`
+ * guard so a rejection cannot advertise a wildcard grant by itself. Opt in by
+ * passing an explicit `Access-Control-Allow-Origin` header in the config.
+ *
+ * @param config - Status, message, optional headers, or redirect target.
+ * @param details - Optional extra payload serialized under `details`.
+ * @returns The error `Response`.
+ */
 export function sendError(config: ErrorConfig, details?: any): Response {
   const code = config.code ?? 400;
 
-  // Use provided headers, falling back to a wildcard CORS if not specified
+  // Only use explicitly provided headers; CORS is owned by the cors guard.
   const headers: Record<string, string> = {
-    "Access-Control-Allow-Origin": "*",
     ...(config.headers || {}),
   };
 

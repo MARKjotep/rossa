@@ -23,8 +23,9 @@ class ApiController {
 `app.use` prepends guards to the global pipeline, so a guard registered later
 runs earlier. Put wrapper guards such as `errorHandler` and
 `security` before the work whose response they should wrap. Use the second
-argument to a guard factory to override its default error message, headers, or
-redirect where applicable; the HTTP status is set by the guard.
+argument to a guard factory to override its default error fields, including the
+HTTP status (`code`), message, headers, or redirect. Any field you omit keeps
+the factory default; `code` finally falls back to `400`.
 
 Always invoke the guard factory: write `@use(deny())`, not `@use(deny)`. The
 pipeline rejects an un-invoked factory with a 500 and a console error naming the
@@ -69,10 +70,17 @@ app.use(requireTenant({ allowedIds: ["tenant-123"] }));
 class TenantController {}
 ```
 
-The second argument to the returned factory can override `message`, `headers`,
-or `redirect` for a particular use. Set the status code in the default config
-passed to `createGuard`; the per-use override does not change it. Use
-`sendError(errorConfig)` when rejecting so the configured status, message, and
+The second argument to the returned factory overrides any default error field
+for a particular use, including `code`:
+
+```ts
+app.use(requireTenant({ allowedIds: ["tenant-123"] }, { code: 451 }));
+```
+
+**Behavior change:** a per-call `code` now wins over the factory default. Omitted
+fields still fall back to the default config, then to `400` for `code`; the
+message defaults to `"Request Failed"` and `headers` are shallow-merged. Use
+`sendError(errorConfig)` when rejecting so the merged status, message, and
 headers are applied. Return or await `next()` to continue the pipeline, and
 avoid calling it more than once.
 
@@ -81,13 +89,13 @@ avoid calling it more than once.
 | Guard | Use | Behavior |
 | --- | --- | --- |
 | `cookies(name)` | Require a cookie | Continues when the named cookie exists in the request's `Cookie` header; returns 401 when it is missing. The value remains available through `ctx.req.cookies.get(name)`. |
-| `multipart()` | Multipart forms | Parses `multipart/form-data` into `ctx.form`; uploaded values remain `File` objects and repeated names become arrays. |
-| `urlencoded()` | HTML forms | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. |
-| `json(schema)` | JSON body | For POST, PUT, and PATCH, checks the content type and 1 MiB default size limit, parses and validates JSON, and puts the validated result on `ctx.req._json`. The schema must be a `z.object(...)` schema. |
+| `multipart()` | Multipart forms | Parses `multipart/form-data` into `ctx.form`; uploaded values remain `File` objects with their declared MIME type and repeated names become arrays. |
+| `urlencoded()` | HTML forms | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. Pass `{ strict: true }` to reject malformed percent-encoding and NUL bytes. |
+| `json(schema)` | JSON body | For POST, PUT, and PATCH, checks the content type and 1 MiB default size limit, parses and validates JSON, and puts the validated result on both `ctx.body` and `ctx.req._json`. The schema must be a `z.object(...)` schema. |
 | `keys(names)` | Required body fields | Parses JSON with `ctx.req.json()`, checks top-level keys, then puts the body on `ctx.body`. It does not validate field types. |
 | `validateQuery(schema)` | Query validation | Coerces and validates query values, then stores the result in `ctx.query`. Duplicate query names are reduced to their last value. |
 | `validateForm(schema)` | Form validation | Parses and validates form values, then stores the result in `ctx.form`. Duplicate field names are reduced to their last value. |
-| `validateUrl(options)` | URL limits and rules | Checks URL/query length, duplicate or disallowed query keys, regex rules, malformed encodings, null bytes, and path traversal patterns. Defaults are 2,048 URL characters and 1,024 query characters. |
+| `validateUrl(options)` | URL limits and rules | Checks URL/query length, duplicate or disallowed query keys, regex rules, malformed encodings, null bytes, and traversal markers in both the pathname and decoded query string. Defaults are 2,048 URL characters and 1,024 query characters. |
 | `contentType(rule)` | Content type | Accepts a MIME type, list of MIME types, or a synchronous check function. Parameters such as `charset` are ignored during matching. |
 
 Example schema validation:
@@ -104,8 +112,38 @@ class UserController {}
 // For a query route, use @use(validateQuery(pageSchema)).
 ```
 
-`json(schema)` stores validated data in `ctx.req._json`; `keys(names)` stores it
-in `ctx.body`. Choose the guard that matches how the handler reads its data.
+`json(schema)` stores validated data in both `ctx.body` and `ctx.req._json`;
+`keys(names)` stores it in `ctx.body`. Read `ctx.body` in handlers;
+`ctx.req._json` remains supported for existing code. When `json(schema)` has
+already written `ctx.body`, `sanitize()` updates both views in place so they stay
+identical.
+
+### Strict URL-encoded parsing
+
+By default `urlencoded()` keeps the lenient `Request.formData()` behavior and
+passes malformed input through verbatim. `urlencoded({ strict: true })` rejects
+a `%` that is not followed by two hex digits (`%ZZ`, a bare `%`) and any NUL byte
+with the guard's merged error config (`400` and its default message unless
+overridden):
+
+```ts
+@use(urlencoded({ strict: true }, { code: 422, message: "Malformed form" }))
+class SignupController {}
+```
+
+Strict mode reads the body once and rebuilds the same `FormData` entries, so
+repeated fields and `+`/percent decoding keep working. `validateForm(schema)` is
+unaffected by the option and still performs its own validation.
+
+### Uploaded file types
+
+`multipart()` preserves the `Content-Type` declared by each part, even though
+Bun's `request.formData()` currently reports `File.type` as empty. Names,
+sizes, and bytes are unchanged. Bun's `File` constructor adds
+`;charset=utf-8` to parameterless text-ish types such as `text/plain` and
+`application/json`, so compare with a prefix or parse parameters when matching
+those types; explicit parameters such as `text/csv;header=present` are kept as
+declared.
 
 ## Authentication and access
 
@@ -114,9 +152,10 @@ in `ctx.body`. Choose the guard that matches how the handler reads its data.
 | `authBearer(check)` | Custom bearer validation | Reads `Authorization: Bearer <token>` and calls `check(ctx, token)`. The check may be async. |
 | `apiKey(check)` | API key validation | Reads `x-api-key` and calls `check(ctx, key)`. |
 | `auth(checks)` | Validate several headers | Takes a map of header names to sync or async validators; every listed header must be present and pass. |
-| `jwtAuth(service)` | JWT access token | Calls `service.verify(token)` and stores decoded claims in `ctx.jwtData`. |
-| `jwtRefresh(service)` | Refresh token | Reads `x-refresh-token`, atomically consumes it, issues a replacement token pair in `ctx.data.jwtTokens`, and stores verified claims in `ctx.jwtData`. |
-| `session(service)` | Session lifecycle | Loads the session into `ctx.session`, runs downstream work, and persists or deletes session changes afterward. With no session cookie it creates an anonymous session. |
+| `jwtAuth(service)` | JWT access token | Calls `service.verify(token)` and stores decoded claims in `ctx.jwtData`. Every rejection is a `401` with `WWW-Authenticate: Bearer`. |
+| `jwtRefresh(service)` | Refresh token | Reads `x-refresh-token`, claims it once, issues a replacement pair in `ctx.data.jwtTokens`, and stores claims in `ctx.data.jwtRefreshData`. Mount after `jwtAuth` on combined routes, or use `jwtRotate`. |
+| `jwtRotate(service)` | Access + refresh rotation | Verifies an `Authorization` token when present, then claims the refresh token and issues a replacement pair. A failed access token returns `401` without claiming the refresh token. |
+| `session(service)` | Session lifecycle | Loads the session into `ctx.session`, runs downstream work, and persists or deletes session changes afterward. Accepts `{ auth, readonly }` and a typed data parameter. With no session cookie it creates an anonymous session. |
 | `requireSession(validator?)` | Verified session | Use after `session(service)`; continues only for a store-backed session — a validly signed cookie whose row exists and is not expired. Anonymous, forged, unknown-ID, and expired sessions get 401 "Authentication required" by default. An optional validator adds an identity check, e.g. `requireSession((s) => typeof (s as any).userId === "number")`. |
 | `authorize(check)` | Authorization | Runs a sync or async policy callback with `ctx`; returns 403 by default when it denies access. Use after authentication. |
 | `csrf(options?)` | CSRF token check | On POST, PUT, PATCH, and DELETE, compares a request header (default `x-csrf-token`) with the `csrf_token` cookie. The application must issue that cookie. |
@@ -166,6 +205,89 @@ would accept a forged session ID. If a handler deletes the last session key, the
 row is deleted, the cookie is cleared, and later requests are anonymous again,
 so `requireSession()` denies them.
 
+### Session mounts, typing, and rotation
+
+`session()` accepts the service instance or a mount object. A readonly mount
+loads the session in read-only mode, discards handler writes, and never
+persists:
+
+```ts
+@use(session({ auth: sessions, readonly: true }))
+class PublicPreviewController {}
+
+@use(session<AccountSession>(sessions))
+class AccountController {}
+```
+
+`SessionContext<TData>` types `ctx.session` with the stored data, so handlers do
+not need casts:
+
+```ts
+import type { SessionContext } from "rossa";
+
+async profile(ctx: SessionContext<AccountSession>) {
+  return ctx.res.json({ userId: ctx.session?.userId });
+}
+```
+
+Rotate the session identifier after a successful login to defend against
+session fixation:
+
+```ts
+await ctx.session!.rotate();
+ctx.session!.userId = user.id;
+```
+
+`rotate()` deletes the previous row immediately, mints a new signed `sid`, and
+marks the session modified; the guard persists the new row and sends its cookie
+after the handler returns. Call it on the success path: a handler that throws
+after rotating leaves the old row deleted and the new row unpersisted. A
+readonly mount ignores the call with a warning; a hand-built `new ServerSide()`
+has no service and throws.
+
+Session and cookie lifetimes honour fractional days to the millisecond
+(`SESSION_LIFETIME: 0.5` is twelve hours). The guard serializes the cookie
+before persisting; when `MAX_COOKIE_SIZE` rejects the cookie it answers with a
+JSON `500` and does not write the row. **Behavior change:** before this, a row
+could be stored and the failure surfaced only after the handler, leaving an
+orphaned session.
+
+### JWT guards
+
+Access and refresh handling are separate guards. On a combined route mount
+`jwtAuth` before `jwtRefresh`; the router runs them in the declared order, so the
+refresh guard sees an already-validated access token:
+
+```ts
+@use(jwtAuth(jwt), jwtRefresh(jwt))
+class SessionController {}
+```
+
+`jwtRefresh` stores refresh claims in `ctx.data.jwtRefreshData` and leaves
+`ctx.jwtData` untouched when `jwtAuth` already populated it. When an
+`Authorization` header is present, it verifies the access token before claiming
+the refresh token, so a failed access check does not consume the token the
+client still needs. A route that refreshes without an access header can instead
+use one guard:
+
+```ts
+@use(jwtRotate(jwt))
+class RotateController {}
+```
+
+`jwtRotate` verifies the access token when present, claims the refresh token,
+and issues a replacement pair. When the access token is absent, the refresh
+claims become `ctx.jwtData`; when it is present, access claims win in
+`ctx.jwtData` and refresh claims remain in `ctx.data.jwtRefreshData`.
+
+Refresh rejections keep the guard's `401` status and message and add a
+machine-readable `error_code` of `"invalid"`, `"expired"`, or `"reused"`.
+JWT guard failures also send `WWW-Authenticate: Bearer`. `reused` means the
+token was validly signed but the store no longer considers it available, so a
+client can distinguish a replay from a genuinely expired token. Services expose
+`consumeWithReason()` for the same distinction; `consume()` keeps its
+claims-or-`null` result.
+
 ## Network and security controls
 
 | Guard | Use | Options and behavior |
@@ -176,7 +298,7 @@ so `requireSession()` denies them.
 | `deny(config?)` | Hard denial | Unconditionally denies the request with 403 "Forbidden" by default. Options are `code`, `message`, `headers`, `redirect`, and `when(ctx)` to deny only matching requests and let others continue, e.g. `deny({ when: (ctx) => ctx.req.method === "TRACE" })`. |
 | `rateLimit(options?)` | Request rate limiting | In-memory per-process counter keyed by IP, method, and path. Defaults: 100 requests per 60 seconds; can add rate and retry headers. |
 | `sanitize(options?)` | Parsed request values | Escapes HTML-sensitive characters in strings in `ctx.query`, `ctx.form`, `ctx.body`, and parsed JSON by default. A custom `sanitizeString` and per-area switches are available. Continue context-aware output encoding when rendering. |
-| `security(options?)` | Response security headers | Adds `nosniff`, `DENY`, and `strict-origin-when-cross-origin` by default. CSP and HSTS are opt-in; other headers can be set or disabled with `false`. |
+| `security(options?)` | Response security headers | Adds `Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY` by default. CSP, HSTS, and the Cross-Origin/Permissions policies are opt-in; any header can be set or removed with `false`. |
 | `csrf(options?)` | Cross-site request forgery | See Authentication and access. |
 
 Example URL/IP/security setup:
@@ -200,8 +322,9 @@ response such as `deny({ code: 503, message: "Under maintenance" })`. Add a
 
 `validateUrl()` runs before the route handler. With no options, it allows URLs
 up to 2,048 characters and query strings up to 1,024 characters, and checks for
-malformed percent escapes, null bytes, and path traversal. Query allowlists,
-denylists, duplicate checks, and value patterns are opt-in.
+malformed percent escapes, null bytes, and traversal markers in both the
+pathname and the decoded query string. Query allowlists, denylists, duplicate
+checks, and value patterns are opt-in.
 
 ```ts
 app.use(
@@ -238,13 +361,20 @@ These requests fail, for the indicated reason:
 | `/files/../private` | Rejected as path traversal. |
 | `/files/%252e%252e/private` | Rejected after repeated decoding reveals `../`. |
 | `/search?q=%ZZ` | Rejected as malformed percent-encoding when path sanitization is on. |
+| `/search?next=../private` | Rejected as query traversal (decoded `../`). |
+| `/search?next=%252e%252e%252fprivate` | Rejected after repeated decoding of the query. |
 
 `allowedKeys` examines parameter names, and each configured `patterns` rule
 checks every value for that name. A pattern does not require its key to be
-present; use a separate validation rule if the parameter is mandatory. The
-path check decodes the full URL repeatedly, so traversal-like text in a query
-value can also be rejected. Set `sanitizePaths: false` to disable only those
-decode, null-byte, and traversal checks; URL length and query rules still run.
+present; use a separate validation rule if the parameter is mandatory.
+
+**Behavior change:** traversal markers are now rejected in the decoded query
+string as well as the pathname, so a query value containing `../`, `..\`, or
+`/..` returns `400` under the defaults. Set `sanitizePaths: false` to disable
+the decode, null-byte, and traversal checks for both places; URL length and query
+rules still run. Reports that only used the pathname can therefore see new `400`
+responses for traversal-like query data. Rejecting the value is intentional:
+query data can also reach filesystem or template sinks.
 
 The guard rejects suspicious requests; it does not rewrite or sanitize them.
 It also does not validate route parameter formats, so validate IDs in the
@@ -256,6 +386,74 @@ the current implementation unless it also matches the blacklist. The rate
 limiter and cache are process-local and do not share state between server
 instances.
 
+## Rejection and framework response shapes
+
+These shapes are stable and safe to assert in application tests.
+
+### `sendError()` and CORS
+
+`sendError(config)` returns `application/json` with `{ success: false, error }`
+(plus `details` when supplied) and emits only the headers in `config.headers`,
+plus `Content-Type` and `Location` where applicable.
+
+**Behavior change:** `sendError()` no longer adds
+`Access-Control-Allow-Origin: *`. Previously every guard rejection advertised a
+wildcard CORS grant. The `cors` guard now owns CORS: mount it before the guards
+whose rejections a browser must read. To opt in for a single response, pass the
+header explicitly:
+
+```ts
+return sendError({
+  code: 403,
+  message: "Forbidden",
+  headers: { "Access-Control-Allow-Origin": "https://app.example.com" },
+});
+```
+
+A CORS rejection is itself a plain `403` JSON error with no wildcard grant.
+
+### `security()` default headers
+
+| Header | Default value |
+| --- | --- |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+
+`Content-Security-Policy` and `Strict-Transport-Security` are opt-in because
+their correct values depend on the application and deployment. The
+Cross-Origin-Embedder/Opener/Resource and `Permissions-Policy` headers are also
+opt-in. Pass a string to set a header, `false` to remove it, or omit it to keep
+the default shown above.
+
+### Inherited OPTIONS and HEAD
+
+Every declared path answers OPTIONS with `204 No Content`, an empty body, and an
+`Allow` header listing every method registered for that path, including
+`OPTIONS`. OPTIONS on a path with no route returns `404`.
+
+| Request | Result |
+| --- | --- |
+| OPTIONS on a declared path | `204`, empty body, `Allow: <declared methods + OPTIONS>` |
+| OPTIONS on an undeclared path | `404` |
+| HEAD with a `head` handler | That handler's response (HTTP suppresses the body) |
+| HEAD without a `head` handler | `404`; there is no automatic GET fallback |
+| A method with no handler on a declared path | `404` |
+
+Override the inherited `options` method to customize the response. The CORS guard
+still owns preflight headers; the inherited handler only advertises methods.
+
+### `errorHandler()` 500 body
+
+The `errorHandler(options?)` guard answers an uncaught downstream error with a
+plain-text `500`, not JSON: `Content-Type: text/plain; charset=utf-8` and the
+body `Internal Server Error` (or `options.message`). That is a different shape
+from a guard rejection, which is JSON via `sendError()`. `onError` replaces both
+the status body and the default message.
+
+Without the guard, the core pipeline boundary answers an uncaught error with an
+empty `500` (and logs it when `logError` is enabled).
+
 ## Response and pipeline guards
 
 | Guard | Use | Behavior |
@@ -265,7 +463,7 @@ instances.
 | `timeout(milliseconds)` | Downstream timeout | Stops waiting after the limit and returns 408 by default. It cannot cancel work already running downstream. |
 | `smartCache({ ttlMs })` | In-memory GET cache | Caches cacheable `200` GET responses by full URL, including the query string. Requests with `Authorization`, `Cookie`, or `Range` headers bypass it, as do `no-cache`/`no-store` requests. Responses with `Set-Cookie`, `Content-Range`, `Vary`, private/no-store/no-cache directives, or zero max-age are not stored. The store is per-process, capped at 1,000 entries, and sweeps expired entries; use it only for public responses. |
 | `staticFiles(options?)` | Static files | Sends GET and HEAD requests for recognized file paths to a static file server. Without options it is a global mount; use `prefix` and `root` to scope a mount. |
-| `errorHandler(options?)` | Error boundary | Catches thrown errors from downstream guards and handlers; returns a generic 500 response unless `onError` is supplied. Place it before the work it should catch. |
+| `errorHandler(options?)` | Error boundary | Catches thrown errors from downstream guards and handlers; returns a plain-text `500` `Internal Server Error` unless `message` or `onError` is supplied. Place it before the work it should catch. |
 
 ```ts
 import { errorHandler, staticFiles } from "rossa";

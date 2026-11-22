@@ -58,11 +58,24 @@ export * from "./guard/urlencoded.guard";
 export * from "./schema";
 
 export { JWTAuthService } from "./auth/jwt/jwt-service";
-export type { JWTConfig, JwtRefreshTokenStore } from "./auth/jwt/jwt-service";
-export type { JwtPayload } from "./auth/jwt/jwt-engine";
+export type {
+  JWTConfig,
+  JwtRefreshTokenStore,
+  RefreshConsumeResult,
+  RefreshRejectionReason,
+} from "./auth/jwt/jwt-service";
+export { JwtEngine } from "./auth/jwt/jwt-engine";
+export type { JwtInspection, JwtPayload } from "./auth/jwt/jwt-engine";
 export { SessionAuthInterface } from "./auth/session/auth-interface";
 export type { AuthConfig } from "./auth/session/auth-interface";
 export { ServerSide } from "./auth/session/server-side";
+export type { SessionInstance } from "./auth/session/server-side";
+export type {
+  SessionConfig,
+  SessionContext,
+  SessionGuard,
+  SessionMount,
+} from "./guard/session.guard";
 
 export { ctx } from "./http/ctx";
 export { Req } from "./http/req";

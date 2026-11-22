@@ -244,6 +244,8 @@ declare class Heder extends Utils {
 }
 type HederPlugin = (h: Heder) => void;
 
+/** A resolved session with both the framework methods and the user's data. */
+type SessionInstance<TData extends Record<string, any> = Record<string, any>> = ServerSide<TData> & TData;
 declare class ServerSide<TData extends Record<string, any> = Record<string, any>> {
     sid: string;
     data: TData;
@@ -252,13 +254,44 @@ declare class ServerSide<TData extends Record<string, any> = Record<string, any>
     isReadOnly: boolean;
     isFound: boolean;
     length: number;
+    /**
+     * Rotation hook supplied by the session service.
+     * @internal
+     */
+    private _rotator?;
     constructor(sid?: string, initialData?: Partial<TData>, readOnly?: boolean, isNew?: boolean, isFound?: boolean);
     /**
      * Generates the dynamic Proxy trapped instance.
      * We use `this & TData` so TypeScript knows this object contains both
      * the class methods AND the dynamic user data.
      */
-    get session(): any;
+    get session(): SessionInstance<TData>;
+    /**
+     * Registers the service callback used by {@link ServerSide.rotate}.
+     * @internal
+     */
+    setRotator(rotator: () => Promise<void>): void;
+    /**
+     * Replaces this session's identifier in place.
+     * @internal
+     */
+    renewSid(sid: string): void;
+    /**
+     * Rotates the session identifier (session-fixation defence).
+     *
+     * The previous row is deleted and this session receives a freshly signed
+     * `sid`; the guard persists the new row and sends its cookie after the
+     * handler returns. Call it after a successful login:
+     *
+     * ```ts
+     * await ctx.session!.rotate();
+     * ctx.session!.userId = user.id;
+     * ```
+     *
+     * A readonly mount ignores rotation. Throws when the session was created
+     * without a session service (for example a hand-built `new ServerSide()`).
+     */
+    rotate(): Promise<void>;
 }
 
 declare class ctx<Args extends Record<string, string> = Record<string, string>, SessionType = ServerSide, BodyType = unknown> {
@@ -283,13 +316,33 @@ declare class ctx<Args extends Record<string, string> = Record<string, string>, 
 }
 
 type ErrorConfig = {
+    /** HTTP status code used for the response. @default 400 */
     code?: number | undefined;
+    /** Message returned in the JSON `error` field; defaults to the status text. */
     message?: string | undefined;
+    /** Redirect target; when set the guard answers `302` instead of an error body. */
     redirect?: string | undefined;
+    /**
+     * Extra response headers merged into the response as-is. CORS headers are
+     * **not** added automatically: pass `Access-Control-Allow-Origin` here (or
+     * mount `cors`) when a browser must read the error response.
+     */
     headers?: Record<string, string> | undefined;
     error?: (ctx: ctx) => Response;
     maxSize?: number | undefined;
 };
+/**
+ * Builds a JSON error response (`{ success: false, error, details? }`).
+ *
+ * Only headers supplied through `config.headers` are emitted (plus
+ * `Content-Type`/`Location`); CORS headers are intentionally left to the `cors`
+ * guard so a rejection cannot advertise a wildcard grant by itself. Opt in by
+ * passing an explicit `Access-Control-Allow-Origin` header in the config.
+ *
+ * @param config - Status, message, optional headers, or redirect target.
+ * @param details - Optional extra payload serialized under `details`.
+ * @returns The error `Response`.
+ */
 declare function sendError(config: ErrorConfig, details?: any): Response;
 
 type ContentEncodingType = "gzip" | "deflate" | "br" | "zstd" | "none";
@@ -737,12 +790,28 @@ type GuardFactoryHandler<TOptions = void, ExtraCfg = Record<string, any>> = (ctx
 type GuardConfig = ErrorConfig & {
     id?: string | undefined;
 };
-type BaseConfig = Omit<ErrorConfig, "code">;
+/**
+ * Per-call guard error configuration. Any field that is provided overrides the
+ * factory default; omitted fields keep the default (or `400` for `code`).
+ */
+type BaseConfig = ErrorConfig;
 type GuardReturnType = {
     (ctx: ctx, next: () => Promise<Response> | Response): Promise<Response>;
     _middlewareId: string;
     id: string;
 };
+/**
+ * Creates a guard factory that merges a shared default error config with a
+ * per-call override.
+ *
+ * The override wins for every field it defines (`code` included); omitted
+ * fields fall back to the default, and `code` finally defaults to `400`.
+ * `message` defaults to `"Request Failed"` and `headers` are shallow-merged.
+ *
+ * @param handler - Guard body invoked with the merged error config.
+ * @param defaultConfig - Factory-wide id and default error config.
+ * @returns A guard factory accepting `(options?, overrideConfig?)`.
+ */
 declare function createGuard<TOptions = void, ExtraCfg = Record<string, unknown>>(handler: GuardFactoryHandler<TOptions, ExtraCfg>, defaultConfig?: GuardConfig): (options?: TOptions, overrideConfig?: BaseConfig) => GuardReturnType;
 
 type Class = new (...args: any[]) => any;
@@ -857,7 +926,14 @@ interface dev {
 }
 interface serverOptions {
     server: Partial<Bun.Serve.Options<any, never>> & dev & {
-        fn?: (port: number) => void;
+        /**
+         * Called after Bun has bound the server, so `port` is the port actually
+         * in use (including an OS-assigned ephemeral port when `port: 0`).
+         *
+         * The second argument is the bound `Bun.Server`; its `url` reflects the
+         * effective host, port, and `https` scheme when `tls` is set.
+         */
+        fn?: (port: number, server: Bun.Server<any>) => void;
     };
     wss?: RossaWebSocketOptions | undefined;
 }
@@ -917,6 +993,19 @@ declare class Rossa extends RouterManager {
     private processRouter;
     private processWSS;
     test(req: Request, encoding?: ContentEncodingType): Promise<Response>;
+    /**
+     * Starts a Bun server for the app.
+     *
+     * Server options are passed directly (`port`, `hostname`, `tls`, ...). The
+     * returned `Bun.Server` is already bound. When `fn` is supplied it runs after
+     * binding and receives the bound port and server, so `port: 0` resolves to
+     * the OS-assigned port. Without `fn`, the startup log prints the bound URL
+     * (`server.url`), including `https` when `tls` is configured.
+     *
+     * @param server - Bun serve options plus the optional `fn` ready callback.
+     * @param wss - Optional WebSocket handler options and message rate limit.
+     * @returns The bound `Bun.Server` instance.
+     */
     serve(server?: serverOptions["server"], wss?: serverOptions["wss"]): Bun.Server<undefined>;
     protected errorHandler(res: res, error: any): Response;
 }
@@ -1630,7 +1719,10 @@ declare namespace z_d {
 declare const DEFAULT_MAX_SIZE: number;
 /**
  * Parses and validates JSON request bodies for POST, PUT, and PATCH requests.
- * The validated value is stored on the request as `_json`.
+ *
+ * The validated value is stored on `ctx.body` (the same field populated by
+ * `keys([...])`) and, for backwards compatibility, on the request as `_json`.
+ * Handlers should read `ctx.body`; `ctx.req._json` remains supported.
  *
  * @param schema - Schema used to validate the parsed JSON object.
  * @returns A guard factory that accepts a schema and optional error config.
@@ -1658,21 +1750,101 @@ type JwtPayload<T> = T & {
      */
     jti?: string;
 };
+/** Result of inspecting a token without throwing. */
+type JwtInspection<T> = {
+    ok: true;
+    payload: JwtPayload<T>;
+} | {
+    ok: false;
+    reason: "invalid" | "expired";
+};
+declare class JwtEngine<T extends Record<string, any> = Record<string, any>> {
+    private readonly secretKey;
+    constructor(secret: string);
+    /**
+     * Generates a signed JWT Access Token.
+     *
+     * A fresh `jti` is always assigned, so signing the same claims twice within
+     * the same clock second still produces two distinct tokens. Any caller
+     * supplied `jti`, `iat`, or `exp` is replaced rather than reused.
+     */
+    sign(payload: T, expiresInMinutes?: number): string;
+    /**
+     * Generates a signed token with a lifetime expressed in seconds.
+     *
+     * Use this for sub-minute lifetimes (tests, short-lived one-off tokens)
+     * without changing the service's minute-based default.
+     */
+    signSeconds(payload: T, expiresInSeconds: number): string;
+    /** Shared token builder; `lifetimeSeconds` is added to the current `iat`. */
+    private build;
+    /**
+     * Verifies the JWT mathematically and reports why an unusable token failed.
+     *
+     * Signature and shape failures are `"invalid"`; a valid signature whose
+     * `exp` has passed is `"expired"`. Never throws.
+     */
+    inspect(token: string): JwtInspection<T>;
+    /**
+     * Verifies the JWT mathematically. Returns payload if valid, or null if expired/tampered.
+     */
+    verify(token: string): JwtPayload<T> | null;
+    /**
+     * Issues a long-lived refresh token.
+     *
+     * Each call produces a distinct token because `sign` assigns a fresh `jti`,
+     * which is what makes rotation + single-use stores replay-safe.
+     */
+    issue(data: T, daysValid?: number): string;
+}
 
+/**
+ * Why a refresh token was rejected.
+ *
+ * - `invalid` — missing, malformed, or forged token (bad signature/shape).
+ * - `expired` — validly signed token whose `exp` has passed.
+ * - `reused` — valid, unexpired token that the store no longer considers
+ *   available (already consumed or otherwise claimed).
+ */
+type RefreshRejectionReason = "invalid" | "expired" | "reused";
+/** Result of a refresh-token consumption attempt. */
+type RefreshConsumeResult<T extends Record<string, any> = {}> = {
+    ok: true;
+    claims: JwtPayload<T>;
+} | {
+    ok: false;
+    reason: RefreshRejectionReason;
+};
 /**
  * Persistence contract for refresh tokens.
  *
  * Implement this interface with any database, key-value store, or external
- * persistence service. `consume` must atomically remove a token and return
- * `true` only for the caller that removed it, preventing concurrent reuse.
+ * persistence service. `consume` must atomically *claim* a token and return
+ * `true` only for the caller that claimed it, preventing concurrent reuse.
+ *
+ * Claim-once does not require deleting the row: a store may keep the row and
+ * stamp `consumed_at`, returning `false` on every later attempt. Keeping the
+ * audit trail is therefore allowed; only the boolean contract matters.
  */
 interface JwtRefreshTokenStore {
     /** Initialize the backing store or its schema when needed. */
     initialize?(): Promise<void>;
     /** Persist a refresh token until its Unix expiration time in milliseconds. */
     save(token: string, expiresAt: number): Promise<void>;
-    /** Atomically remove a stored refresh token and report whether it existed. */
+    /**
+     * Atomically claim a stored refresh token and report whether this caller
+     * won. May delete the row or mark it consumed; later calls must return
+     * `false`.
+     */
     consume(token: string): Promise<boolean>;
+    /**
+     * Optional maintenance hook: remove rows that expired before `before`
+     * (Unix milliseconds). Implementations without it keep working; callers
+     * should treat a missing hook as a no-op.
+     *
+     * @returns The number of removed rows, when the store reports it.
+     */
+    deleteExpired?(before: number): Promise<number | void>;
 }
 interface JWTConfig {
     /** Refresh token lifetime in days. Defaults to 7. */
@@ -1693,8 +1865,14 @@ declare class JWTAuthService<T extends Record<string, any> = {}> {
     constructor(refreshTokens: JwtRefreshTokenStore, secret: string, config?: JWTConfig);
     /** Initialize the configured persistence adapter, if it needs initialization. */
     init(): Promise<void>;
-    /** Sign an access token using the configured access-token lifetime. */
-    sign(payload: T): string;
+    /**
+     * Sign an access token.
+     *
+     * @param payload - Claims to embed.
+     * @param lifetimeSeconds - Optional per-call lifetime in seconds. When
+     * omitted, the service's minute-based `tokenValidity` is used.
+     */
+    sign(payload: T, lifetimeSeconds?: number): string;
     /** Verify an access token and return its claims, or `null` if invalid. */
     verify(token: string): JwtPayload<T> | null;
     /**
@@ -1703,6 +1881,20 @@ declare class JWTAuthService<T extends Record<string, any> = {}> {
      * @returns The token claims when consumption succeeds; otherwise `null`.
      */
     consume(token: string): Promise<JwtPayload<T> | null>;
+    /**
+     * Atomically consume a refresh token and report why it was rejected.
+     *
+     * Expired, malformed, and already-claimed tokens are distinguished without
+     * changing {@link JWTAuthService.consume}'s existing claims/`null` result.
+     */
+    consumeWithReason(token: string): Promise<RefreshConsumeResult<T>>;
+    /**
+     * Remove refresh-token rows that expired before `before` when the store
+     * implements the optional cleanup hook. Stores without it are a no-op.
+     *
+     * @param before - Unix milliseconds cutoff (defaults to now).
+     */
+    deleteExpired(before?: number): Promise<number | void>;
     /** Issue a refresh token, persist it, and return it with a new access token. */
     issue(payload: T): Promise<{
         accessToken: string;
@@ -1711,7 +1903,16 @@ declare class JWTAuthService<T extends Record<string, any> = {}> {
 }
 
 /**
- * Verifies a Bearer access token and stores its decoded claims in `ctx.jwtData`.
+ * Verifies a Bearer access token and stores its decoded claims in
+ * `ctx.jwtData`.
+ *
+ * Every rejection carries `WWW-Authenticate: Bearer` and the guard's 401
+ * body. When composing with {@link jwtRefresh}, mount this guard first so the
+ * refresh guard runs with an already-validated access token:
+ *
+ * ```ts
+ * @use(jwtAuth(service), jwtRefresh(service))
+ * ```
  *
  * @param service - JWT service used to verify the access token.
  * @returns A guard factory that accepts a JWT service and optional error config.
@@ -1719,13 +1920,48 @@ declare class JWTAuthService<T extends Record<string, any> = {}> {
 declare const jwtAuth: (options?: JWTAuthService<any> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 /**
  * Consumes an `x-refresh-token`, issues a replacement token pair, and stores
- * the authenticated claims in `ctx.jwtData` and the new tokens in
+ * the refresh claims in `ctx.data.jwtRefreshData` and the new tokens in
  * `ctx.data.jwtTokens`.
+ *
+ * `ctx.jwtData` is only populated with the refresh claims when the access
+ * guard has not already set it; access claims therefore win on combined
+ * routes. When an `Authorization` header is present, the access token is
+ * verified before the refresh token is consumed, so a refresh-first route
+ * does not burn the token when authentication ultimately fails.
+ *
+ * Compose after {@link jwtAuth} where possible, or use {@link jwtRotate} for
+ * a single rotation endpoint:
+ *
+ * ```ts
+ * @use(jwtAuth(service), jwtRefresh(service))
+ * ```
  *
  * @param service - JWT service used to consume and issue tokens.
  * @returns A guard factory that accepts a JWT service and optional error config.
  */
 declare const jwtRefresh: (options?: JWTAuthService<any> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+/**
+ * Rotates a session in one guard: verifies the access token when present and
+ * then consumes the refresh token.
+ *
+ * - Access token present and invalid → 401 without consuming the refresh
+ *   token, so a failed authentication never burns it.
+ * - Access token present and valid → its claims stay in `ctx.jwtData`.
+ * - Access token absent → refresh claims become `ctx.jwtData` (refresh-only
+ *   rotation).
+ *
+ * The refresh claims are always also exposed as `ctx.data.jwtRefreshData` and
+ * the replacement pair as `ctx.data.jwtTokens`. Every 401 carries
+ * `WWW-Authenticate: Bearer`; refresh failures include `error_code`.
+ *
+ * ```ts
+ * @use(jwtRotate(service))
+ * ```
+ *
+ * @param service - JWT service used to verify, consume, and issue tokens.
+ * @returns A guard factory that accepts a JWT service and optional error config.
+ */
+declare const jwtRotate: (options?: JWTAuthService<any> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 /**
  * Logs the request method, path, timestamp, and optional label before continuing.
@@ -1753,6 +1989,10 @@ declare const loggerFN: (options?: ((ff: logFN) => any) | undefined, overrideCon
 /**
  * Parses a multipart request and stores its fields and uploaded files in
  * `ctx.form`.
+ *
+ * Uploaded `File` objects keep the MIME type declared in their part headers,
+ * including when Bun's parser reports `File.type` as empty. Field names,
+ * file names, sizes, and bytes are unchanged.
  *
  * @returns A guard factory that parses multipart form data before continuing.
  */
@@ -1889,29 +2129,65 @@ type newSession = {
     readonly?: boolean | undefined;
     isFound?: boolean;
 };
-declare abstract class SessionAuthInterface extends SidGenerator {
+/**
+ * Abstract session service: signing, cookie serialization, expiration, and
+ * identifier rotation. Subclasses implement the storage hooks.
+ *
+ * @typeParam TData - Shape of the data stored on the session. It types the
+ * resolved session (see {@link SessionInstance}) without casts.
+ */
+declare abstract class SessionAuthInterface<TData extends Record<string, any> = Record<string, any>> extends SidGenerator {
     config: Required<AuthConfig>;
     constructor(config: AuthConfig, salt?: string);
     init(): Promise<void>;
     /**
      * Verifies the cryptographic signature and opens the session.
      */
-    openSession(sid?: string, readonly?: boolean): Promise<ServerSide>;
+    openSession(sid?: string, readonly?: boolean): Promise<SessionInstance<TData>>;
     /** To be implemented by child class: Retrieve from DB */
-    fetchSession(sid: string, readonly?: boolean): Promise<any>;
+    fetchSession(sid: string, readonly?: boolean): Promise<SessionInstance<TData>>;
     abstract fetchData(sid: string, readonly?: boolean): Promise<any | undefined>;
     /** To be implemented by child class: Save to DB */
     abstract saveSession(session: ServerSide, headers: Headers): Promise<void>;
     /** To be implemented by child class: Save to DB */
     abstract deleteSession(session: ServerSide, headers: Headers): Promise<void>;
     /** Instantiates a fresh, writable session */
-    new({ sid, isFound, readonly, }: newSession): ServerSide;
+    new({ sid, isFound, readonly, }: newSession): SessionInstance<TData>;
     /** Instantiates a read-only session */
-    get readonly(): ServerSide;
+    get readonly(): SessionInstance<TData>;
+    /**
+     * Attaches the rotation hook and exposes the proxy that merges the
+     * framework API with the session data.
+     */
+    protected materialize(session: ServerSide<TData>): SessionInstance<TData>;
+    /**
+     * Mints a new signed `sid` for the session and deletes the previous row.
+     *
+     * The guard persists the new row (and sends its cookie) after the handler
+     * returns because the session is marked modified. Used by
+     * {@link ServerSide.rotate}; call that instead of this method directly.
+     *
+     * @param session - Session to re-key. Must not be readonly.
+     */
+    rotateSession(session: ServerSide<TData>): Promise<void>;
+    /**
+     * Deletes a stored row without emitting a cookie for the new session.
+     * A store that fails after deleting the row (for example while serializing
+     * the removal cookie) is still treated as successful.
+     */
+    private removeStoredSession;
     /**
      * Calculates the exact Date object when this session expires.
+     *
+     * Fractional-day lifetimes are preserved: computation is performed in
+     * milliseconds instead of truncating through `Date#setDate`.
      */
     get getSessionExpirationDate(): Date;
+    /**
+     * Calculates the exact Date object when the session cookie expires.
+     *
+     * Fractional-day lifetimes are preserved to the millisecond.
+     */
     get getCookieExpirationDate(): Date;
     /**
      * Verifies if the session is still active and has not expired.
@@ -1927,21 +2203,62 @@ declare abstract class SessionAuthInterface extends SidGenerator {
     /**
      * Extracts the Cookie directly from the Web API Request instance.
      */
-    loadHeader(req: Request, readonly?: boolean): Promise<[string | undefined, ServerSide]>;
+    loadHeader(req: Request, readonly?: boolean): Promise<[string | undefined, SessionInstance<TData>]>;
 }
 
-interface SessionConfig {
-    auth: SessionAuthInterface;
+/**
+ * Object form accepted by {@link session}. A readonly mount loads the session
+ * without letting handlers mutate or persist it.
+ */
+interface SessionMount<TData extends Record<string, any> = Record<string, any>> {
+    /** Session service used to load, save, and delete sessions. */
+    auth: SessionAuthInterface<TData>;
+    /** Discard handler writes and skip persistence. Defaults to `false`. */
     readonly?: boolean;
 }
+/**
+ * Legacy name for {@link SessionMount}; kept so existing imports keep
+ * compiling.
+ */
+type SessionConfig = SessionMount;
+/** A session guard with its data shape attached for editor hints. */
+type SessionGuard<TData extends Record<string, any>> = GuardReturnType & {
+    /** Phantom marker: the session data shape mounted by this guard. */
+    readonly __sessionData?: TData;
+};
 /**
  * Loads the request session into `ctx.session` and persists session changes
  * after downstream guards and handlers complete.
  *
- * @param auth - Session service used to load, save, and delete sessions.
- * @returns A guard factory that accepts a session service and optional error config.
+ * Accepts a session service directly (the original form) or a mount object
+ * with a readonly switch:
+ *
+ * ```ts
+ * @use(session(sessions))                     // writable
+ * @use(session({ auth: sessions, readonly: true })) // discard writes
+ * @use(session<AccountSession>(sessions))     // typed ctx.session data
+ * ```
+ *
+ * Type the handler context with {@link SessionContext} (or read the session
+ * from the generic mount) to avoid casting `ctx.session` data properties.
+ *
+ * @param mount - Session service, or `{ auth, readonly? }`.
+ * @param overrideConfig - Optional error configuration for persistence errors.
+ * @returns A guard that loads, exposes, and persists the request session.
  */
-declare const session: (options?: SessionAuthInterface | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare function session<TData extends Record<string, any> = Record<string, any>>(mount: SessionAuthInterface<any> | SessionMount<any>, overrideConfig?: BaseConfig): SessionGuard<TData>;
+/**
+ * A `ctx` whose `session` is typed with the mounted session data.
+ *
+ * ```ts
+ * import type { SessionContext } from "rossa";
+ *
+ * async post(ctx: SessionContext<AccountSession>) {
+ *   ctx.session?.email; // string — no cast
+ * }
+ * ```
+ */
+type SessionContext<TData extends Record<string, any> = Record<string, any>> = ctx<Record<string, string>, SessionInstance<TData>>;
 /** Optional extra check applied to a session that `session()` already resolved. */
 type SessionValidator = (session: ServerSide) => boolean | Promise<boolean>;
 /**
@@ -2030,23 +2347,47 @@ interface UrlValidationOptions {
     allowedKeys?: string[];
     disallowedKeys?: string[];
     noDuplicates?: boolean;
+    /** Block path traversal attempts in the pathname and decoded query string (`../` or `%2e%2e`). */
     sanitizePaths?: boolean;
     patterns?: Record<string, RegExp>;
 }
 /**
  * Validates URL and query limits, query keys, duplicate keys, and path safety.
  *
+ * Traversal markers are rejected in both the decoded pathname and the decoded
+ * query string unless `sanitizePaths` is `false`, so `/search?x=../etc`
+ * answers 400 under the default configuration.
+ *
  * @param options - URL size, query, and path validation rules.
  * @returns A guard factory that accepts validation rules and optional error config.
  */
 declare const validateUrl: (options?: number | void | UrlValidationOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
+interface UrlencodedOptions {
+    /**
+     * Reject malformed percent-encoding (`%ZZ`, a bare `%`) and NUL bytes as a
+     * normal guard rejection instead of passing them through verbatim.
+     *
+     * The rejection uses the guard's error config, so the message and status are
+     * configurable: `urlencoded({ strict: true }, { code: 422, message: "..." })`.
+     *
+     * @default false
+     */
+    strict?: boolean;
+}
 /**
  * Parses an URL-encoded form request and stores its fields in `ctx.form`.
  *
+ * By default malformed percent-encoding and NUL bytes are accepted verbatim
+ * (the lenient behavior of `Request.formData()`). Pass
+ * `urlencoded({ strict: true })` to reject them with the guard's error config
+ * (400 by default).
+ *
+ * @param options - Optional `strict` parsing mode.
+ * @param overrideConfig - Per-call error status/message/headers.
  * @returns A guard factory that parses URL-encoded form data before continuing.
  */
-declare const urlencoded: (options?: void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const urlencoded: (options?: UrlencodedOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 type ScopeDecorator<V> = (value: undefined, context: ClassFieldDecoratorContext<any, V>) => (this: any) => V;
 type ScopeProxy<T> = {
@@ -2087,5 +2428,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
-export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
+export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };

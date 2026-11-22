@@ -7,7 +7,8 @@ export interface UrlValidationOptions {
   allowedKeys?: string[]; // Strict whitelist of allowed query parameter keys
   disallowedKeys?: string[]; // Blacklist forbidden query parameter keys
   noDuplicates?: boolean; // Reject duplicate query keys (e.g., ?id=1&id=2)
-  sanitizePaths?: boolean; // Block path traversal attempts (../ or %2e%2e)
+  /** Block path traversal attempts in the pathname and decoded query string (`../` or `%2e%2e`). */
+  sanitizePaths?: boolean;
   patterns?: Record<string, RegExp>; // Enforce regex matching per query key
 }
 
@@ -25,8 +26,19 @@ function decodeFully(value: string): string {
   return decoded;
 }
 
+/** Detects the traversal markers used for both pathnames and query strings. */
+function hasTraversalMarker(value: string): boolean {
+  return (
+    value.includes("../") || value.includes("..\\") || value.includes("/..")
+  );
+}
+
 /**
  * Validates URL and query limits, query keys, duplicate keys, and path safety.
+ *
+ * Traversal markers are rejected in both the decoded pathname and the decoded
+ * query string unless `sanitizePaths` is `false`, so `/search?x=../etc`
+ * answers 400 under the default configuration.
  *
  * @param options - URL size, query, and path validation rules.
  * @returns A guard factory that accepts validation rules and optional error config.
@@ -101,12 +113,12 @@ export const validateUrl = createGuard<
         });
       }
 
-      // Detect directory traversal sequences in the path only; query values are
-      // opaque data and may legitimately contain text such as `/../`.
+      // Detect directory traversal sequences in the pathname and in decoded
+      // query values: query data can reach filesystem or template sinks too,
+      // so the same markers are rejected in both places.
       if (
-        decodedPath.includes("../") ||
-        decodedPath.includes("..\\") ||
-        decodedPath.includes("/..")
+        hasTraversalMarker(decodedPath) ||
+        hasTraversalMarker(decodedSearch)
       ) {
         return sendError({
           code: 400,

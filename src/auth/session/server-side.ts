@@ -1,3 +1,8 @@
+/** A resolved session with both the framework methods and the user's data. */
+export type SessionInstance<
+  TData extends Record<string, any> = Record<string, any>,
+> = ServerSide<TData> & TData;
+
 export class ServerSide<
   TData extends Record<string, any> = Record<string, any>,
 > {
@@ -8,6 +13,13 @@ export class ServerSide<
   public isReadOnly: boolean;
   public isFound: boolean;
   length = 0;
+
+  /**
+   * Rotation hook supplied by the session service.
+   * @internal
+   */
+  private _rotator?: () => Promise<void>;
+
   constructor(
     sid: string = "",
     initialData: Partial<TData> = {},
@@ -34,7 +46,7 @@ export class ServerSide<
    * We use `this & TData` so TypeScript knows this object contains both
    * the class methods AND the dynamic user data.
    */
-  public get session(): any {
+  public get session(): SessionInstance<TData> {
     return new Proxy<any>(this, {
       get(target, prop: string | symbol) {
         // 1. Allow access to native class properties/methods first (e.g., .cookie(), .sid)
@@ -106,6 +118,52 @@ export class ServerSide<
         }
         return undefined;
       },
-    }) as this & TData;
+    }) as SessionInstance<TData>;
+  }
+
+  /**
+   * Registers the service callback used by {@link ServerSide.rotate}.
+   * @internal
+   */
+  public setRotator(rotator: () => Promise<void>): void {
+    this._rotator = rotator;
+  }
+
+  /**
+   * Replaces this session's identifier in place.
+   * @internal
+   */
+  public renewSid(sid: string): void {
+    this.sid = sid;
+  }
+
+  /**
+   * Rotates the session identifier (session-fixation defence).
+   *
+   * The previous row is deleted and this session receives a freshly signed
+   * `sid`; the guard persists the new row and sends its cookie after the
+   * handler returns. Call it after a successful login:
+   *
+   * ```ts
+   * await ctx.session!.rotate();
+   * ctx.session!.userId = user.id;
+   * ```
+   *
+   * A readonly mount ignores rotation. Throws when the session was created
+   * without a session service (for example a hand-built `new ServerSide()`).
+   */
+  public async rotate(): Promise<void> {
+    if (this.isReadOnly) {
+      console.warn("session: readonly");
+      return;
+    }
+
+    if (!this._rotator) {
+      throw new Error(
+        "session: rotate() requires a session service; use session(auth) first.",
+      );
+    }
+
+    await this._rotator();
   }
 }
