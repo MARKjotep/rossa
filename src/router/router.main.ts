@@ -12,9 +12,11 @@ import { mergeGuards } from "@/guard/@/merge.guard";
 import type { GuardReturnType } from "@/guard/@/base.guard";
 import { GUARD_KEY } from "@/guard/@/@.guard";
 import { Websocket } from "@/wss/websocket.wss";
+import type { ctx } from "@/http/ctx";
 
 //-- Types
 type Class = new (...args: any[]) => any;
+type RouteHandler = (ctx: ctx) => Promise<Response> | Response;
 
 // --- Controller Interfaces ---
 export interface WssBaseController {
@@ -53,6 +55,7 @@ export class RouterManager {
   public wssRoutes: WssRouteConfig[] = [];
   protected globalGuards: any[] = [];
   private registeredSignatures = new Set<string>();
+  private programmaticRoutes = new Set<string>();
 
   // ---  ---------------------------------------------------------------
 
@@ -75,12 +78,27 @@ export class RouterManager {
 
   // ---  ---------------------------------------------------------------
 
+  private fullRoutePath(path: string): string {
+    return (
+      `${this.globalBasePath}${path}`
+        .replace(/\/+/g, "/")
+        .replace(/\/$/, "") || "/"
+    );
+  }
+
   private compiler(_path: string): { regex: RegExp; paramNames: string[] } {
     const paramNames: string[] = [];
-    const regexString = _path.replace(/:([a-zA-Z0-9_]+)/g, (_, paramName) => {
-      paramNames.push(paramName as string);
-      return "([^/]+)";
-    });
+    // Escape literal text and only translate `:name` segments into capture groups.
+    const regexString = _path.replace(
+      /[.*+?^${}()|[\]\\]|:([a-zA-Z0-9_]+)/g,
+      (match, paramName?: string) => {
+        if (paramName) {
+          paramNames.push(paramName);
+          return "([^/]+)";
+        }
+        return `\\${match}`;
+      },
+    );
     return { regex: new RegExp(`^${regexString}\\/?$`), paramNames };
   }
 
@@ -93,7 +111,7 @@ export class RouterManager {
 
     if (this.registeredSignatures.has(signature)) {
       throw new Error(
-        `[Router Error] Duplicate wss route collision detected: ${_path} ` +
+        `[Router Error] Duplicate ${type} route collision detected: ${_path} ` +
           `in controller ${className}`,
       );
     }
@@ -104,15 +122,12 @@ export class RouterManager {
       const classMeta = Refl.get.class(ROUTE_KEY, _cs);
       const classGuards = Refl.get.class(GUARD_KEY, _cs);
 
-      if (!classMeta.length) return;
+      if (!classMeta.length) continue;
 
       for (const _rmeta of classMeta) {
         const controllerPath = _rmeta.basePath ?? "/";
 
-        const fullBasePath =
-          `${this.globalBasePath}${controllerPath}`
-            .replace(/\/+/g, "/")
-            .replace(/\/$/, "") || "/";
+        const fullBasePath = this.fullRoutePath(controllerPath);
 
         this.checkSignature(fullBasePath, _cs.name, "wss");
 
@@ -136,7 +151,7 @@ export class RouterManager {
 
       const classMeta = Refl.get.class(ROUTE_KEY, _cs);
 
-      if (!classMeta.length) return;
+      if (!classMeta.length) continue;
 
       // --- k ---------------------------------------------------------------
       // class level Guards
@@ -149,10 +164,7 @@ export class RouterManager {
       for (const _rmeta of classMeta) {
         const controllerPath = _rmeta.basePath ?? "/";
 
-        const fullBasePath =
-          `${this.globalBasePath}${controllerPath}`
-            .replace(/\/+/g, "/")
-            .replace(/\/$/, "") || "/";
+        const fullBasePath = this.fullRoutePath(controllerPath);
 
         this.checkSignature(fullBasePath, _cs.name);
 
@@ -197,6 +209,55 @@ export class RouterManager {
         });
       }
     }
+  }
+
+  /**
+   * Registers a programmatic HTTP route without a decorated controller class.
+   * Used by framework features such as MCP endpoints; a matching programmatic
+   * route can be replaced, while a decorated HTTP route at the same path is a
+   * collision.
+   */
+  protected registerHandlerRoute(
+    path: string,
+    handlers: Partial<Record<methodsKeys, RouteHandler>>,
+    options: { replace?: boolean } = {},
+  ): void {
+    const fullPath = this.fullRoutePath(path);
+    const existingIndex = this.httpRoutes.findIndex(
+      (route) => route.path === fullPath,
+    );
+
+    if (existingIndex !== -1) {
+      if (!options.replace || !this.programmaticRoutes.has(fullPath)) {
+        throw new Error(
+          `[Router Error] Route collision detected: ${fullPath} is already registered as an HTTP route.`,
+        );
+      }
+
+      this.httpRoutes.splice(existingIndex, 1);
+      this.registeredSignatures.delete(`http:${fullPath}`);
+      this.programmaticRoutes.delete(fullPath);
+    }
+
+    this.checkSignature(fullPath, "programmatic route");
+
+    const { regex, paramNames } = this.compiler(fullPath);
+    const methods: methodGuards = {};
+
+    for (const [method, handler] of Object.entries(handlers)) {
+      if (!handler) continue;
+      methods[method as methodsKeys] = { guards: [], handler };
+    }
+
+    this.httpRoutes.push({
+      path: fullPath,
+      regex,
+      paramNames,
+      controller: ProgrammaticController,
+      methods,
+      methodKeys: Object.keys(methods),
+    });
+    this.programmaticRoutes.add(fullPath);
   }
 
   protected matchWSS(
@@ -303,4 +364,7 @@ export class RouterManager {
 class _uRoute {}
 
 const _R: Omit<typeof _uRoute, "prototype"> = _uRoute;
+
+/** Placeholder controller metadata for routes registered by the framework. */
+class ProgrammaticController {}
 // ---  ---------------------------------------------------------------

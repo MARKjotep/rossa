@@ -6,7 +6,10 @@ import { errorHandler } from "../../src/guard/error.guard";
 import { ipFilter } from "../../src/guard/ip.guard";
 import { logger, loggerFN } from "../../src/guard/logger.guard";
 import { IpMatcher } from "../../src/guard/shared/ip-matcher";
-import { RateStore } from "../../src/guard/shared/rate-store";
+import {
+  RateStore,
+  sweepExpiredRateLimits,
+} from "../../src/guard/shared/rate-store";
 import { rateLimit } from "../../src/guard/rate.guard";
 import { timeout } from "../../src/guard/timeout.guard";
 import { validateUrl } from "../../src/guard/url.guard";
@@ -97,6 +100,44 @@ describe("security and pipeline guards", () => {
     expect(() => new IpMatcher(["10.0.0.0/33"])).toThrow(RangeError);
   });
 
+  it("matches IPv6 literals, CIDR ranges, and IPv4-mapped addresses", async () => {
+    const loopback = new IpMatcher(["::1"]);
+    expect(loopback.test("::1")).toBe(true);
+    expect(loopback.test("2001:db8::1")).toBe(false);
+    expect(loopback.test("127.0.0.1")).toBe(false);
+
+    const network = new IpMatcher(["2001:db8::/32"]);
+    expect(network.test("2001:db8:abcd::42")).toBe(true);
+    expect(network.test("2001:db9::1")).toBe(false);
+    expect(network.test("10.0.0.1")).toBe(false);
+
+    const mapped = new IpMatcher(["10.0.0.1", "192.168.1.0/24"]);
+    expect(mapped.test("::ffff:10.0.0.1")).toBe(true);
+    expect(mapped.test("::ffff:192.168.1.42")).toBe(true);
+    expect(mapped.test("::ffff:10.0.0.2")).toBe(false);
+
+    // IPv4 wildcards must not accidentally accept unrelated IPv6 addresses.
+    expect(new IpMatcher(["*.*.*.*"]).test("::1")).toBe(false);
+    expect(() => new IpMatcher(["2001:db8::/129"])).toThrow(RangeError);
+    expect(() => new IpMatcher(["::gggg"])).toThrow(RangeError);
+
+    const allow6 = await runGuard(
+      ipFilter({ whitelist: ["::1"] }),
+      new Request("http://localhost/", {
+        headers: { "x-forwarded-for": "::1" },
+      }),
+    );
+    expect(allow6.response.status).toBe(200);
+
+    const deny6 = await runGuard(
+      ipFilter({ whitelist: ["::1"] }),
+      new Request("http://localhost/", {
+        headers: { "x-forwarded-for": "2001:db8::1" },
+      }),
+    );
+    expect(deny6.response.status).toBe(403);
+  });
+
   it("rate limits by address, method, and path and emits headers", async () => {
     const guard = rateLimit({ max: 1, windowMs: 60_000 });
     const makeRequest = () =>
@@ -112,6 +153,17 @@ describe("security and pipeline guards", () => {
     const second = await runGuard(guard, makeRequest());
     expect(second.response.status).toBe(429);
     expect(second.response.headers.get("retry-after")).not.toBeNull();
+  });
+
+  it("sweeps expired rate-limit records", () => {
+    const now = Date.now();
+    RateStore.set("expired", { count: 1, reset: now - 1 });
+    RateStore.set("active", { count: 1, reset: now + 10_000 });
+
+    sweepExpiredRateLimits(now);
+
+    expect(RateStore.has("expired")).toBe(false);
+    expect(RateStore.has("active")).toBe(true);
   });
 
   it("caches by full URL but bypasses credentials and private responses", async () => {
@@ -215,6 +267,28 @@ describe("security and pipeline guards", () => {
       new Request(`http://localhost/${"a".repeat(40)}`),
     );
     expect(tooLong.response.status).toBe(414);
+  });
+
+  it("checks path traversal only in the pathname", async () => {
+    const guard = validateUrl();
+
+    const queryValue = await runGuard(
+      guard,
+      new Request("http://localhost/search?next=/../admin"),
+    );
+    expect(queryValue.response.status).toBe(200);
+
+    const encodedPath = await runGuard(
+      guard,
+      new Request("http://localhost/..%2Fprivate"),
+    );
+    expect(encodedPath.response.status).toBe(400);
+
+    const doubleEncodedPath = await runGuard(
+      guard,
+      new Request("http://localhost/%252e%252e/private"),
+    );
+    expect(doubleEncodedPath.response.status).toBe(400);
   });
 
   it("catches downstream errors and applies request timeouts", async () => {

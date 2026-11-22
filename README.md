@@ -1,12 +1,11 @@
 # Rossa
 
 Rossa is a Bun HTTP server with decorator-based routing, request guards, a
-response/context API, and optional WebSocket routes.
+response/context API, SSE, WebSocket routes, authentication building blocks,
+and a small SQL repository layer. This README is the quick start; see
+[`doc/features.md`](doc/features.md) for the complete feature reference.
 
-For browser-side data storage, see the standalone [IndexedDB helper](indexeddb/README.md)
-outside `src`, with schema/column builders and typed CRUD operations.
-
-## Install and build
+## Install
 
 Rossa requires Bun. In an application, install the published package and import
 its public API from `rossa`:
@@ -15,9 +14,10 @@ its public API from `rossa`:
 bun add rossa
 ```
 
-The package build bundles the runtime entry point for Bun and emits TypeScript
-declarations under `dist/`. Run `bun run build` before packing or publishing;
-`bun pm pack --dry-run` previews the files included in the package.
+The published package ships bundled JavaScript and TypeScript declarations under
+`dist/`. From a source checkout, run `bun run builder.ts` before packing;
+`bun pm pack --dry-run` previews the files included. The project intentionally
+has no `build` npm script.
 
 ## Create a server
 
@@ -42,19 +42,15 @@ app.register(Users);
 app.serve({ port: 3000, hostname: "localhost" });
 ```
 
-Call `app.getPaths()` after registering controllers to get an array of HTTP
-route paths, including any `basePath`. Parameter names have their colons removed:
-
-```ts
-app.getPaths(); // ["/users/id"]
-```
+Call `app.getPaths()` after registering controllers to list HTTP paths, including
+any `basePath`, with parameter colons removed (for example `["/users/id"]`).
 
 `Rossa` accepts these options:
 
 | Option           | Default      | Purpose                                                                                                   |
 | ---------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
 | `basePath`       | `""`         | Prefix added to registered HTTP and WebSocket routes.                                                     |
-| `clientPath`     | `"./public"` | Directory used by `res.fileServer()`.                                                                     |
+| `clientPath`     | `"./public"` | Directory used by `res.fileServer()`. A relative path is resolved from the parent of `dirPath`.           |
 | `dirPath`        | `"./src"`    | Anchor used to resolve a relative `clientPath`.                                                           |
 | `fileExtensions` | `[]`         | Additional extensions to recognize, with or without a leading dot. Built-in extensions remain recognized. |
 | `logError`       | `false`      | Log errors caught by the router pipeline.                                                                 |
@@ -62,30 +58,12 @@ app.getPaths(); // ["/users/id"]
 
 `app.serve(serverOptions, websocketOptions)` starts Bun's server. The first
 argument accepts Bun serve options plus an optional `fn(port)` callback. The
-second argument accepts Bun WebSocket options. If no port is provided, Rossa
-uses `3000`.
+second argument accepts Bun WebSocket options plus Rossa's optional
+`messageRateLimit`. If no port is provided, Rossa uses `3000`.
 
-## Static files
-
-Rossa recognizes common web, image, font, text, and JSON extensions by
-default. Add extensions such as PDF or WebAssembly when creating the app:
-
-```ts
-const app = new Rossa({ fileExtensions: [".pdf", "wasm"] });
-```
-
-The `req.isFile` check recognizes these extensions. A catch-all route can then
-call `res.fileServer()` to serve from `clientPath`:
-
-```ts
-@route("/:file")
-class PublicFiles extends Methods {
-  get({ req, res }: ctx): Promise<Response> | Response {
-    if (req.isFile) return res.fileServer();
-    return res.null(404);
-  }
-}
-```
+`app.test(request, encoding?)` runs a `Request` through the same pipeline
+without binding a socket. `app.registerWSS(...)` registers WebSocket
+controllers, described below.
 
 ## Routes and request context
 
@@ -104,9 +82,18 @@ class Notes extends Methods {
 }
 ```
 
+Rossa supplies an inherited `options` handler for each declared path. It
+returns `204` with an `Allow` header built from the methods registered for that
+path.
+
 Useful response methods include `text`, `html`, `json`, `success`, `error`,
-`redirect`, `null`, and `fileServer`. Route parameters are exposed as strings
-on `ctx.params`; query parameters are available from `ctx.req.query`.
+`redirect`, `null`, `file`, and `fileServer`. Route parameters are exposed as
+strings on `ctx.params`; query parameters are available from `ctx.req.query`.
+Guards may place validated values on `ctx.query`, `ctx.body`, or `ctx.form`.
+
+For SSE, a GET request whose `Accept` header allows `text/event-stream` routes
+to `event`. Return `res.event.asyncStream(...)`, `res.event.eStream(...)`, or
+`res.event.readableStream(...)`; these require a live Bun server.
 
 ## Guards
 
@@ -129,20 +116,52 @@ class Api extends Methods {
 }
 ```
 
-The public entry point exports guard factories for authentication, caching,
-compression, content type, cookies, CORS, CSRF, errors, forms, headers, IP
-filtering, JSON, JWT, logging, multipart, query validation, rate limiting,
-sanitization, security headers, sessions, static files, timeouts, and URL
-validation. See [`doc/guards.md`](doc/guards.md) for guard behavior and
-examples.
+`app.use` prepends guards, so a guard registered later runs earlier. Place
+wrapper guards such as `errorHandler` and `security` before the work whose
+response they should wrap.
+
+The public entry point exports guard factories for authentication
+(`authBearer`, `apiKey`, `auth`, `authorize`), caching (`smartCache`), content
+type, cookies, CORS, CSRF, error boundaries (`errorHandler`), headers, IP
+filtering, JSON body validation, required JSON keys (`keys`), JWT (`jwtAuth`,
+`jwtRefresh`), logging (`logger`, `loggerFN`), multipart and URL-encoded forms,
+query and form validation, rate limiting, sanitization, security headers,
+sessions, static files, timeouts, and URL validation. Define reusable custom
+guards with `createGuard`. See [`doc/guards.md`](doc/guards.md) for guard
+behavior and examples.
+
+## Static files
+
+Rossa recognizes common web, image, font, text, and JSON extensions by default.
+Add extensions such as PDF or WebAssembly when creating the app:
+
+```ts
+const app = new Rossa({ fileExtensions: [".pdf", "wasm"] });
+```
+
+The `req.isFile` check recognizes these extensions. A catch-all route can then
+call `res.fileServer()` to serve from `clientPath`:
+
+```ts
+@route("/:file")
+class PublicFiles extends Methods {
+  get({ req, res }: ctx): Promise<Response> | Response {
+    if (req.isFile) return res.fileServer();
+    return res.null(404);
+  }
+}
+```
+
+The static server checks resolved paths against the configured root (including
+symlink resolution), caches small files, and supports ETags.
 
 ## WebSockets
 
 Decorate a `Websocket` subclass with `@wss(path)` and register it with
-`app.registerWSS`. Its `open`, `message`, and `close` methods handle the
-connection lifecycle. Guards on the WebSocket route can place verified
-identity in `ctx.data`; Rossa copies that data to `this.contextData` before
-calling `open`.
+`app.registerWSS`. Its `open`, `message`, `close`, and `drain` methods handle the
+connection lifecycle. Guards on the WebSocket route can place verified identity
+in `ctx.data`; Rossa copies that data to `this.contextData` before calling
+`open`.
 
 ```ts
 import { Rossa, Websocket, wss } from "rossa";
@@ -174,19 +193,59 @@ app.serve(
 `messageRateLimit` is optional and counts inbound messages independently for
 each socket using a fixed time window. When a socket exceeds its limit, Rossa
 closes it with code `1008`. `maxPayloadLength`, `backpressureLimit`, and
-`closeOnBackpressureLimit` are Bun WebSocket options. A controller may implement
-`drain()` to resume work after Bun drains buffered outbound data. Topic
-`manager.broadcast(...)` returns per-topic statuses (`sent`, `backpressured`,
-`dropped`, or `oversize`) so handlers can observe publish outcomes.
+`closeOnBackpressureLimit` are Bun options. `drain()` runs after Bun drains
+buffered outbound data.
+
+`this.manager` is a per-connection `subManager` backed by the process-wide
+`WSSMAN` singleton. Use it to subscribe to topics, broadcast, inspect members,
+set admin flags, and configure room capacity or payload limits. Broadcast
+results report each topic as `sent`, `backpressured`, `dropped`, or `oversize`.
 
 For the handshake, frame parsing, lifecycle, and sample chat message contract,
 see [`doc/websockets.md`](doc/websockets.md).
 
+## MCP (Model Context Protocol)
+
+Rossa can expose an MCP server over Streamable HTTP. Extend `McpController`,
+declare tools, resources, and prompts in `build`, then register the decorated
+class:
+
+```ts
+import { McpController, McpServer, Rossa, mcp } from "rossa";
+
+const app = new Rossa();
+
+@mcp("/mcp", { origin: "https://app.example.com" })
+class Assistant extends McpController {
+  build(server: McpServer) {
+    server.registerTool(
+      "echo",
+      { description: "Echo a fixed value" },
+      async () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+  }
+}
+
+app.registerMCP(Assistant);
+```
+
+For an explicit path without a controller class, pass a per-request factory:
+`app.registerMCP("/mcp", (context) => new McpServer({ name: "raw", version: "1.0.0" }))`.
+
+`origin` accepts full origins, bare hostnames, or `scheme://*`; requests without
+an `Origin` header always pass. POST is served, GET and DELETE return `405`, and
+OPTIONS/HEAD return `404`. Global `app.use(...)` guards run before the endpoint
+and can block it, but header-only guards such as `cors()` do not decorate the
+SDK's response; use `origin` or handle MCP CORS at a proxy.
+
+See the [MCP chapter](doc/features.md#mcp-model-context-protocol) and the
+[official TypeScript SDK docs](https://ts.sdk.modelcontextprotocol.io/v2/).
+
 ## Test requests without starting a server
 
 `app.test(request)` runs a `Request` through the same router pipeline and
-returns a `Response`. The runnable example in [`test.ts`](test.ts) shows HTTP,
-guards, WebSockets, and this in-process request method.
+returns a `Response`. The runnable [`test.ts`](test.ts) shows HTTP, guards,
+WebSockets, and this method.
 
 ```ts
 const response = await app.test(
@@ -197,30 +256,35 @@ console.log(response.status, await response.text());
 
 ## Public exports
 
-`src/index.ts` is the package entry point. It exports:
+`src/index.ts` exports `Rossa` and its option types; `Methods`, `RouterManager`,
+`route`, and `wss`; guard factories with `use` and `createGuard`; `ctx`, `Req`,
+`Res`, and `sendError`; WebSocket classes and `WSSMAN`; MCP (`McpController`,
+`McpServer`, `mcp`); authentication, database, and `Field`/`Scope` APIs. See
+[`doc/features.md`](doc/features.md) for names.
 
-- `Rossa` and its `RossaOptions`, `serverOptions`, and `dev` types.
-- `ContentEncodingType` for the supported response encodings.
-- `Methods`, `RouterManager`, `route`, `wss`, and router metadata types.
-- `use`, `createGuard`, guard factories, and guard-related types.
-- `ctx`, `Req`, `Res`, and response error types.
-- `Websocket`, `wssMessage`, `WssConfig`, `WssManager`, `subManager`, and the
-  default `WSSMAN` singleton.
-- `Field` for typed field scopes. See [`doc/field-scopes.md`](doc/field-scopes.md)
-  for a route example.
+## Documentation and examples
+
+| Document                                                   | Contents                                                   |
+| ---------------------------------------------------------- | ---------------------------------------------------------- |
+| [`doc/features.md`](doc/features.md)                       | Complete feature and API reference.                        |
+| [`doc/guards.md`](doc/guards.md)                           | Guard behavior, ordering, and custom guards.               |
+| [`doc/websockets.md`](doc/websockets.md)                   | WebSocket client contract, lifecycle, and limits.          |
+| [MCP TypeScript SDK](https://ts.sdk.modelcontextprotocol.io/v2/) | Official MCP server docs for tools, resources, and prompts. |
+| [`doc/session-auth.md`](doc/session-auth.md)               | Session service implementation and login backend example.  |
+| [`doc/db.md`](doc/db.md)                                   | Repository, schema, dialects, and schema synchronization.  |
+| [`doc/field-scopes.md`](doc/field-scopes.md)               | Typed `Field` decorators and shared [`Scope`](doc/scopes.md) values. |
+| [`doc/routing-style.md`](doc/routing-style.md)             | Route registration and matching model.                     |
+| [`src/wss/examples/README.md`](src/wss/examples/README.md) | Group chat, direct message, and bot examples.              |
 
 Run the sample with `bun run test.ts`.
 
-For a group chat built on per-conversation topics, session authentication,
-membership checks, and a persistence adapter, see
-[`src/wss/examples/README.md`](src/wss/examples/README.md).
-
 ## Load harness
 
-Run the repeatable local WebSocket load harness with `bun run test:load`. It
-reports fan-out delivery ratio, latency percentiles, publish statuses, and RSS
-memory change. Set `BENCH_CLIENTS`, `BENCH_DURATION_SECONDS`,
+Run the local WebSocket load harness with `bun run test:load`. It reports
+fan-out delivery, latency percentiles, publish statuses, and RSS change.
+Configure it with `BENCH_CLIENTS`, `BENCH_DURATION_SECONDS`,
 `BENCH_MESSAGES_PER_SECOND`, `BENCH_DELIVERY_TIMEOUT_MS`, or
-`BENCH_BACKPRESSURE_LIMIT` to adjust the workload. Use a staging environment
-and representative deployment limits before drawing production capacity
-conclusions.
+`BENCH_BACKPRESSURE_LIMIT`. It is a benchmark, not a capacity guarantee.
+WebSocket rooms, rate-limit counters, and the small-file cache are process-local;
+multi-instance deployments need shared pub/sub, membership state, and rate
+limiting.

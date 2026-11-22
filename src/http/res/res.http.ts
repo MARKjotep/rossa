@@ -316,10 +316,10 @@ export class res {
       ...this._headers,
     };
 
-    const range = isBunFile ? this.req.headers.get("range") : null;
+    const rangeHeader = isBunFile ? this.req.headers.get("range") : null;
 
     // --- Standard Request ---
-    if (!range) {
+    if (!rangeHeader) {
       let body: BodyInit = file as BodyInit;
       const finalHeaders: HeaderObject = { ...baseHeaders };
 
@@ -352,16 +352,46 @@ export class res {
     }
 
     // --- Range Request (BunFile only) ---
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0]!, 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-    if (start >= fileSize || end >= fileSize) {
-      return new Response(null, {
+    const rangeNotSatisfiable = () =>
+      new Response(null, {
         status: 416,
         headers: { "Content-Range": `bytes */${fileSize}`, ...this._headers },
       });
+
+    const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (!rangeMatch) return rangeNotSatisfiable();
+
+    const rawStart = rangeMatch[1] ?? "";
+    const rawEnd = rangeMatch[2] ?? "";
+
+    let start: number;
+    let end: number;
+
+    if (rawStart === "") {
+      // Suffix range: `bytes=-N` requests the final N bytes.
+      const suffixLength = Number(rawEnd);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+        return rangeNotSatisfiable();
+      }
+      start = Math.max(fileSize - suffixLength, 0);
+      end = fileSize - 1;
+    } else {
+      start = Number(rawStart);
+      end = rawEnd === "" ? fileSize - 1 : Number(rawEnd);
     }
+
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 0 ||
+      start > end ||
+      start >= fileSize
+    ) {
+      return rangeNotSatisfiable();
+    }
+
+    // RFC 9110: an end position beyond the representation is clamped to its last byte.
+    end = Math.min(end, fileSize - 1);
 
     return new Response((file as BunFile).slice(start, end + 1), {
       status: 206,

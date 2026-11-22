@@ -61,6 +61,17 @@ describe("Rossa HTTP smoke tests", () => {
     expect(missing.status).toBe(404);
   });
 
+  it("continues registering controllers after an undecorated class", async () => {
+    const app = new Rossa({ Encoding: "none" });
+    app.register(HealthController, class extends Methods {}, ItemController);
+
+    const item = await app.test(
+      new Request("http://localhost/items/later", { method: "GET" }),
+    );
+    expect(item.status).toBe(200);
+    expect(await item.json()).toEqual({ id: "later" });
+  });
+
   it("applies a base path and builds request context from the matched route", async () => {
     const app = new Rossa({ basePath: "/api/", Encoding: "none" });
     app.register(ContextController);

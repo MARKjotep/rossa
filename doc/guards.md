@@ -228,7 +228,7 @@ instances.
 | `logger(label?)` | Request logging | Logs method, path, timestamp, and an optional label before downstream work. |
 | `loggerFN(formatter)` | Custom logging | Calls the formatter after downstream work with `{ ctx, res, timestamp, method, url }`, then logs a truthy return value. |
 | `timeout(milliseconds)` | Downstream timeout | Stops waiting after the limit and returns 408 by default. It cannot cancel work already running downstream. |
-| `smartCache({ ttlMs })` | In-memory GET cache | Caches 200 responses by pathname. It ignores query strings and user identity, so use only for public responses. |
+| `smartCache({ ttlMs })` | In-memory GET cache | Caches cacheable `200` GET responses by full URL, including the query string. Requests with `Authorization`, `Cookie`, or `Range` headers bypass it, as do `no-cache`/`no-store` requests. Responses with `Set-Cookie`, `Content-Range`, `Vary`, private/no-store/no-cache directives, or zero max-age are not stored. The store is per-process, capped at 1,000 entries, and sweeps expired entries; use it only for public responses. |
 | `staticFiles()` | Static files | Sends GET and HEAD requests for recognized file paths to the configured static file server. Register globally before route handling. |
 | `errorHandler(options?)` | Error boundary | Catches thrown errors from downstream guards and handlers; returns a generic 500 response unless `onError` is supplied. Place it before the work it should catch. |
 

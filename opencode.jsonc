@@ -1,0 +1,102 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/glm-5.3-flash",
+  "default_agent": "build",
+
+  "agents": {
+    "build": {
+      "description": "Lead architect and orchestrator",
+      "mode": "primary",
+      "model": "opencode-go/glm-5.3-flash",
+      "system": "Act as the lead architect and orchestrator. Understand requirements, plan implementation, and delegate all coding, file modifications, bug fixes, and testing to the code agent. Allow at most three concurrent subagents working on independent tasks. Never assign overlapping file modifications. Use specialists only when necessary. Avoid redundant exploration, reasoning, and reviews. Independently verify implementation results. Require concise worker reports. Stop when requirements and validation pass.",
+      "permissions": [{ "action": "edit", "resource": "*", "effect": "deny" }],
+    },
+
+    "advisor": {
+      "description": "Resolve difficult architectural decisions only when the orchestrator is stuck",
+      "mode": "subagent",
+      "model": "opencode-go/glm-5.3#high",
+      "steps": 8,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "code": {
+      "description": "Primary implementation worker responsible for coding, file modifications, bug fixes, and testing",
+      "mode": "all",
+      "model": "opencode-go/deepseek-v4.1-flash#high",
+      "system": "Implement assigned tasks directly. Inspect only relevant files. Follow existing project conventions. Make minimal, correct changes. Run appropriate tests and validation. Fix discovered implementation errors. Avoid unrelated refactoring and unnecessary dependencies. Return a concise report containing changed files, validation results, and unresolved issues. Do not delegate to other agents.",
+      "permissions": [
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "evaluate": {
+      "description": "Evaluate complex solutions and technical tradeoffs only when necessary",
+      "mode": "subagent",
+      "model": "opencode-go/gpt-6-luna#max",
+      "steps": 8,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "explore": {
+      "description": "Quickly locate relevant files, symbols, and dependencies without modifying files",
+      "mode": "subagent",
+      "model": "opencode-go/mimo-v2.6-flash",
+      "steps": 15,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "research": {
+      "description": "Research external documentation and implementation questions only when needed",
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4.1-flash#medium",
+      "steps": 12,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "review": {
+      "description": "Review substantial changes for bugs, regressions, security issues, and missing tests",
+      "mode": "subagent",
+      "model": "opencode-go/gpt-6-luna#high",
+      "steps": 15,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "sanity_check": {
+      "description": "Quickly verify small changes and obvious issues without extensive analysis",
+      "mode": "subagent",
+      "model": "opencode-go/mimo-v2.6-flash",
+      "steps": 6,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+
+    "vision": {
+      "description": "Analyze screenshots and visual inputs only when required",
+      "mode": "subagent",
+      "model": "opencode-go/gpt-6-luna#medium",
+      "steps": 6,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+      ],
+    },
+  },
+}

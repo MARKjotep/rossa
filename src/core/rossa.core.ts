@@ -14,6 +14,14 @@ import {
   type WssMessageRateLimit,
   type wssMessage,
 } from "@/wss/config.wss";
+import {
+  createMcpControllerFactory,
+  createMcpRoute,
+  getMcpMeta,
+  McpController,
+  type McpOptions,
+  type McpServerFactory,
+} from "@/mcp";
 
 //-- Types
 
@@ -70,6 +78,113 @@ export class Rossa extends RouterManager {
     this.fileServer = new StaticFileServer(
       this.clientRoot,
       options.fileExtensions || [],
+    );
+  }
+
+  /**
+   * Mounts an MCP server over Streamable HTTP.
+   *
+   * Use the decorator idiom for controllers:
+   * ```ts
+   * @mcp("/mcp")
+   * class MyMcp extends McpController {
+   *   build(server: McpServer) { ... }
+   * }
+   * app.registerMCP(MyMcp);
+   * ```
+   *
+   * A raw per-request factory remains available when an explicit path is
+   * supplied: `app.registerMCP("/mcp", () => new McpServer(...))`.
+   *
+   * Decorator-provided options are merged with per-call options; a per-call
+   * `origin` wins. Global guards added with `use(...)` run before the MCP
+   * handler. Registering the same path again replaces the previous MCP route.
+   *
+   * @param controller - A decorated `McpController` class or instance.
+   * @param options - Optional per-call MCP settings.
+   */
+  registerMCP(controller: McpController, options?: McpOptions): void;
+  registerMCP(
+    controller: new () => McpController,
+    options?: McpOptions,
+  ): void;
+  /**
+   * Mounts a raw MCP factory at an explicit path.
+   *
+   * @param path - MCP endpoint path, for example `/mcp`.
+   * @param factory - Produces the `McpServer` served for each request.
+   * @param options - Optional allowed browser origins.
+   */
+  registerMCP(
+    path: string,
+    factory: McpServerFactory,
+    options?: McpOptions,
+  ): void;
+  registerMCP(
+    controllerOrPath: McpController | (new () => McpController) | string,
+    factoryOrOptions: McpServerFactory | McpOptions = {},
+    options: McpOptions = {},
+  ): void {
+    if (typeof controllerOrPath === "string") {
+      const factory = factoryOrOptions as McpServerFactory;
+      if (typeof factory !== "function") {
+        throw new TypeError(
+          "[MCP Error] registerMCP(path, factory) requires an McpServerFactory function.",
+        );
+      }
+
+      this.mountMcp(controllerOrPath, factory, options);
+      return;
+    }
+
+    const isInstance = controllerOrPath instanceof McpController;
+    const ControllerClass = isInstance
+      ? controllerOrPath.constructor
+      : controllerOrPath;
+
+    const meta = getMcpMeta(ControllerClass);
+    if (!meta) {
+      throw new Error(
+        `[MCP Error] ${ControllerClass.name || "Controller"} is missing the @mcp decorator. ` +
+          `Decorate it with @mcp("/path") or register it with an explicit path and factory.`,
+      );
+    }
+
+    const controller = isInstance
+      ? controllerOrPath
+      : new (controllerOrPath as new () => McpController)();
+
+    const callOptions = factoryOrOptions as McpOptions;
+    const mergedOptions: McpOptions = {
+      ...meta.options,
+      ...(callOptions.origin !== undefined
+        ? { origin: callOptions.origin }
+        : {}),
+    };
+
+    this.mountMcp(
+      meta.path,
+      createMcpControllerFactory(controller),
+      mergedOptions,
+    );
+  }
+
+  private mountMcp(
+    path: string,
+    factory: McpServerFactory,
+    options: McpOptions,
+  ): void {
+    const handler = createMcpRoute(factory, options);
+
+    this.registerHandlerRoute(
+      path,
+      {
+        POST: handler,
+        GET: handler,
+        DELETE: handler,
+        EVENT: handler,
+      },
+      { replace: true },
     );
   }
 

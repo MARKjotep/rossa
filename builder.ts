@@ -1,7 +1,7 @@
 import { Roll, Oven } from "@ohmyqt/oven";
 
 const Ov = new Oven({
-  external: ["bun", "reflect-metadata"],
+  external: ["bun", "reflect-metadata", "@modelcontextprotocol/server"],
 });
 
 const RP = new Roll({

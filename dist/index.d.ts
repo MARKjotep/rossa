@@ -1,4 +1,6 @@
 import { Server, SocketAddress, BunFile, ServerWebSocket, WebSocketHandler, SQL } from 'bun';
+import { McpServer, McpRequestContext } from '@modelcontextprotocol/server';
+export { McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 
 declare class req {
     readonly request: Request;
@@ -737,6 +739,7 @@ type GuardReturnType = {
 declare function createGuard<TOptions = void, ExtraCfg = Record<string, unknown>>(handler: GuardFactoryHandler<TOptions, ExtraCfg>, defaultConfig?: GuardConfig): (options?: TOptions, overrideConfig?: BaseConfig) => GuardReturnType;
 
 type Class = new (...args: any[]) => any;
+type RouteHandler = (ctx: ctx) => Promise<Response> | Response;
 interface WssBaseController {
     open?(ws: any): void;
     message(ws: any, message: string | Uint8Array): void;
@@ -768,12 +771,23 @@ declare class RouterManager {
     wssRoutes: WssRouteConfig[];
     protected globalGuards: any[];
     private registeredSignatures;
+    private programmaticRoutes;
     constructor(globalBasePath?: string);
     use(...guards: GuardReturnType[]): void;
+    private fullRoutePath;
     private compiler;
     private checkSignature;
     registerWSS(...ControllerClass: (typeof Websocket<{}>)[]): void;
     register(...ControllerClass: (typeof Methods)[]): void;
+    /**
+     * Registers a programmatic HTTP route without a decorated controller class.
+     * Used by framework features such as MCP endpoints; a matching programmatic
+     * route can be replaced, while a decorated HTTP route at the same path is a
+     * collision.
+     */
+    protected registerHandlerRoute(path: string, handlers: Partial<Record<methodsKeys, RouteHandler>>, options?: {
+        replace?: boolean;
+    }): void;
     protected matchWSS(url: string): Partial<WssRouteConfig & {
         params: HttpRouteMatch["params"];
     }>;
@@ -782,6 +796,51 @@ declare class RouterManager {
     /** Returns registered HTTP paths, including the base path, with parameter colons removed. */
     getPaths(): string[];
 }
+
+/**
+ * Base class for decorator-driven MCP endpoints.
+ *
+ * The framework creates a fresh `McpServer` for each request (named after the
+ * controller class) and calls {@link McpController.build} before serving it.
+ * Combine it with the `@mcp("/path")` decorator and register it with
+ * `app.registerMCP(MyController)`.
+ */
+declare abstract class McpController {
+    /**
+     * Builds the MCP server: register tools, resources, and prompts here.
+     * Runs once per request via the SDK factory, so async setup is supported.
+     */
+    abstract build(server: McpServer): void | Promise<void>;
+}
+
+/**
+ * Produces a fresh MCP server for one HTTP exchange. Under the SDK's v2
+ * handler the factory runs once per request, so per-request tools are possible.
+ * Zero-argument factories remain assignable.
+ */
+type McpServerFactory = (context: McpRequestContext) => McpServer | Promise<McpServer>;
+interface McpOptions {
+    /**
+     * Allowed browser `Origin` values. Entries may be full origins
+     * (`https://app.example.com`), hostnames (`app.example.com`), or the SDK's
+     * extension form (`moz-extension://*`). Full origins are matched exactly
+     * (scheme, host, and port); hostnames are matched port-agnostically.
+     *
+     * Requests without an `Origin` header always pass, as non-browser MCP
+     * clients do not send one. When omitted, Origin validation is disabled;
+     * production apps should set this or use the CORS and IP guards.
+     */
+    origin?: string | string[];
+}
+
+/**
+ * Marks an {@link McpController} subclass as an MCP endpoint.
+ *
+ * @param path - MCP endpoint path, resolved under the app's `basePath`.
+ * @param options - Optional MCP endpoint settings such as allowed origins.
+ * @returns A class decorator, used as `@mcp("/mcp")`.
+ */
+declare function mcp(path?: string, options?: McpOptions): <TTarget extends abstract new (...args: any[]) => McpController>(target: TTarget, context: ClassDecoratorContext<any>) => void | TTarget;
 
 interface dev {
     path?: string;
@@ -813,6 +872,39 @@ declare class Rossa extends RouterManager {
     fileServer: StaticFileServer;
     private clientRoot;
     constructor(options?: RossaOptions);
+    /**
+     * Mounts an MCP server over Streamable HTTP.
+     *
+     * Use the decorator idiom for controllers:
+     * ```ts
+     * @mcp("/mcp")
+     * class MyMcp extends McpController {
+     *   build(server: McpServer) { ... }
+     * }
+     * app.registerMCP(MyMcp);
+     * ```
+     *
+     * A raw per-request factory remains available when an explicit path is
+     * supplied: `app.registerMCP("/mcp", () => new McpServer(...))`.
+     *
+     * Decorator-provided options are merged with per-call options; a per-call
+     * `origin` wins. Global guards added with `use(...)` run before the MCP
+     * handler. Registering the same path again replaces the previous MCP route.
+     *
+     * @param controller - A decorated `McpController` class or instance.
+     * @param options - Optional per-call MCP settings.
+     */
+    registerMCP(controller: McpController, options?: McpOptions): void;
+    registerMCP(controller: new () => McpController, options?: McpOptions): void;
+    /**
+     * Mounts a raw MCP factory at an explicit path.
+     *
+     * @param path - MCP endpoint path, for example `/mcp`.
+     * @param factory - Produces the `McpServer` served for each request.
+     * @param options - Optional allowed browser origins.
+     */
+    registerMCP(path: string, factory: McpServerFactory, options?: McpOptions): void;
+    private mountMcp;
     private get getClientRoot();
     private pipeline;
     private processRouter;
@@ -1248,7 +1340,7 @@ declare const jwtRefresh: (options?: JWTAuthService<any> | undefined, overrideCo
  * @param label - Optional text included in the log entry.
  * @returns A guard factory that accepts a label and optional error config.
  */
-declare const logger: (options?: void | string | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const logger: (options?: string | void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 type logFN = {
     ctx: ctx;
     res: Response;
@@ -1488,7 +1580,7 @@ interface UrlValidationOptions {
  * @param options - URL size, query, and path validation rules.
  * @returns A guard factory that accepts validation rules and optional error config.
  */
-declare const validateUrl: (options?: void | number | UrlValidationOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const validateUrl: (options?: number | void | UrlValidationOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 /**
  * Parses an URL-encoded form request and stores its fields in `ctx.form`.
@@ -1536,5 +1628,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, Field, ForeignKeyError, JWTAuthService, Methods, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaBuilder, Scope, ServerSide, SessionAuthInterface, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, multipart, mysqlDialect, postgresDialect, rateLimit, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z };
-export type { AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, JWTConfig, JwtPayload, JwtRefreshTokenStore, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SanitizeOptions, SecurityHeadersOptions, SessionConfig, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, Field, ForeignKeyError, JWTAuthService, McpController, Methods, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaBuilder, Scope, ServerSide, SessionAuthInterface, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z };
+export type { AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, JWTConfig, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SanitizeOptions, SecurityHeadersOptions, SessionConfig, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };

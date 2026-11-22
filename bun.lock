@@ -4,17 +4,24 @@
   "workspaces": {
     "": {
       "name": "rossa",
+      "dependencies": {
+        "@modelcontextprotocol/server": "^2.4.0",
+        "reflect-metadata": "^0.2.2",
+      },
       "devDependencies": {
         "@ohmyqt/oven": "link:@ohmyqt/oven",
         "@ohmyqt/u": "link:@ohmyqt/u",
         "@types/bun": "^1.4.4",
         "fake-indexeddb": "^6.2.8",
-        "reflect-metadata": "^0.2.2",
         "typescript": "^5.9.3",
       },
     },
   },
   "packages": {
+    "@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.4.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q=="],
+
+    "@modelcontextprotocol/server": ["@modelcontextprotocol/server@2.4.0", "", { "dependencies": { "@modelcontextprotocol/core": "2.4.0", "zod": "^4.2.0" } }, "sha512-rgR9yxSaAJ+bcsi/XroT/S2AfPiIWloXAnrdfYSCms9ivVju0ishu/wW0J21Ho6+ZOR1r7RyeRbjiRuF87ix5Q=="],
+
     "@ohmyqt/oven": ["@ohmyqt/oven@link:@ohmyqt/oven", {}],
 
     "@ohmyqt/u": ["@ohmyqt/u@link:@ohmyqt/u", {}],
@@ -32,5 +39,7 @@
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "undici-types": ["undici-types@8.9.0", "", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
+
+    "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
   }
 }

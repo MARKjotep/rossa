@@ -14,6 +14,17 @@ export interface UrlValidationOptions {
 const DEFAULT_MAX_URL = 2048; // 2 KB
 const DEFAULT_MAX_QUERY = 1024; // 1 KB
 
+/** Decodes repeatedly so double-encoded traversal (`%252e`) is still visible. */
+function decodeFully(value: string): string {
+  let decoded = value;
+  let previous = "";
+  while (decoded !== previous && decoded.includes("%")) {
+    previous = decoded;
+    decoded = decodeURIComponent(decoded);
+  }
+  return decoded;
+}
+
 /**
  * Validates URL and query limits, query keys, duplicate keys, and path safety.
  *
@@ -69,14 +80,12 @@ export const validateUrl = createGuard<
 
     // 5. Path Traversal & Injection Guard
     if (opts.sanitizePaths !== false) {
-      let decodedUrl = fullUrl;
+      let decodedPath: string;
+      let decodedSearch: string;
       try {
         // Multi-pass decoding catches double-encoded traversal attempts (%252e -> %2e -> .)
-        let previousUrl = "";
-        while (decodedUrl !== previousUrl && decodedUrl.includes("%")) {
-          previousUrl = decodedUrl;
-          decodedUrl = decodeURIComponent(decodedUrl);
-        }
+        decodedPath = decodeFully(urlObj.pathname);
+        decodedSearch = decodeFully(urlObj.search);
       } catch {
         return sendError({
           code: 400,
@@ -85,18 +94,19 @@ export const validateUrl = createGuard<
       }
 
       // Detect null byte injection
-      if (decodedUrl.includes("\0")) {
+      if (decodedPath.includes("\0") || decodedSearch.includes("\0")) {
         return sendError({
           code: 400,
           message: "Null byte injection detected in URL.",
         });
       }
 
-      // Detect directory traversal sequences
+      // Detect directory traversal sequences in the path only; query values are
+      // opaque data and may legitimately contain text such as `/../`.
       if (
-        decodedUrl.includes("../") ||
-        decodedUrl.includes("..\\") ||
-        decodedUrl.includes("/..")
+        decodedPath.includes("../") ||
+        decodedPath.includes("..\\") ||
+        decodedPath.includes("/..")
       ) {
         return sendError({
           code: 400,

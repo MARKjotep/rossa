@@ -17,6 +17,10 @@ export type {
 export type { methodsKeys } from "./router/methods.router";
 export { route, wss } from "./router/@";
 
+export { McpServer } from "@modelcontextprotocol/server";
+export { McpController, mcp } from "./mcp";
+export type { McpOptions, McpRequestContext, McpServerFactory } from "./mcp";
+
 export * from "./db";
 
 export { use } from "./guard/@/@.guard";

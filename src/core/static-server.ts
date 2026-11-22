@@ -11,6 +11,22 @@ interface CachedFile {
 }
 
 const fileCache: Map<string, CachedFile> = new Map();
+const MAX_CACHE_ENTRIES = 1000;
+
+/** Keeps the shared small-file cache bounded by evicting expired/oldest entries. */
+function ensureCacheCapacity(now: number): void {
+  if (fileCache.size < MAX_CACHE_ENTRIES) return;
+
+  for (const [key, entry] of fileCache) {
+    if (entry.expiresAt <= now) fileCache.delete(key);
+  }
+
+  while (fileCache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = fileCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    fileCache.delete(oldestKey);
+  }
+}
 
 export const DEFAULT_FILE_EXTENSIONS = new Set([
   // Web/Markup
@@ -80,7 +96,14 @@ export class StaticFileServer {
   }
 
   public async serve(req: Req, res: Res): Promise<Response> {
-    const pathname = req.url.pathname;
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(req.url.pathname);
+    } catch {
+      return res.error(400, "Bad Request");
+    }
+    if (pathname.includes("\0")) return res.error(400, "Bad Request");
+
     const candidate = resolve(this.absoluteClientPath, `.${pathname}`);
     const relativeCandidate = relative(this.absoluteClientPath, candidate);
 
@@ -137,6 +160,7 @@ export class StaticFileServer {
           expiresAt: currentTime + this.CACHE_TTL, // Set the expiration window
         };
 
+        ensureCacheCapacity(currentTime);
         fileCache.set(targetDiskLocation, cached);
       }
     }

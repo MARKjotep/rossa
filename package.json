@@ -1,7 +1,7 @@
 {
   "name": "rossa",
-  "version": "0.0.5",
-  "description": "Rossa Bun JS framework",
+  "version": "0.1.0",
+  "description": "A Bun and TypeScript web framework with routing, middleware guards, WebSockets, authentication, and database tools.",
   "author": "Marky <markjotep@gmail.com>",
   "license": "MIT",
   "main": "dist/index.js",
@@ -36,13 +36,15 @@
     "url": "https://github.com/MARKjotep/rossa/issues"
   },
   "homepage": "https://github.com/MARKjotep/rossa#readme",
-  "dependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "reflect-metadata": "^0.2.2"
+  },
   "devDependencies": {
     "@ohmyqt/oven": "link:@ohmyqt/oven",
     "@ohmyqt/u": "link:@ohmyqt/u",
     "@types/bun": "^1.4.4",
     "fake-indexeddb": "^6.2.8",
-    "reflect-metadata": "^0.2.2",
     "typescript": "^5.9.3"
   },
   "type": "module"
