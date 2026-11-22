@@ -96,6 +96,15 @@ Update it as work changes; mark complete only after acceptance is verified. Keep
 open work specific, and do not repeat progress checklists elsewhere. Reports may
 include per-run validation output.
 
+## Build
+
+- The project has its own build pipeline: `builder.ts` at the repository root
+  (run with `bun run builder.ts`). It bundles `dist/` and rolls the public
+  declarations — always use it for production builds instead of ad-hoc
+  `bun build` or `tsc` invocations.
+- Do not build if `builder.ts` is missing: stop and report the blocker rather
+  than improvising a replacement pipeline.
+
 ## Source organization and API docs
 
 - Keep TypeScript source modular by responsibility. Split long files containing

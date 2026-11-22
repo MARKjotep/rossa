@@ -317,7 +317,14 @@ declare class StaticFileServer {
     private readonly CACHE_TTL;
     constructor(resolvedAssetRootPath: string, additionalExtensions?: string[]);
     isFile(path: string): boolean;
-    serve(req: req, res: res): Promise<Response>;
+    /**
+     * Serves the request from this server's root.
+     *
+     * @param lookupPath - Optional already-decoded path to resolve instead of the
+     * request pathname. Scoped mounts use it to serve a prefix-stripped path;
+     * when omitted the request URL is decoded exactly as before.
+     */
+    serve(req: req, res: res, lookupPath?: string): Promise<Response>;
 }
 
 type HeaderObject = Record<string, string>;
@@ -970,28 +977,28 @@ interface DbDialectAdapter {
     buildColumnType(column: Column): string;
     normalizeOperator(operator: string): string;
     version(db: SQL): Promise<string>;
-    createTable(db: SQL, schema: Schema<any>): Promise<void>;
-    getColumns(db: SQL, schema: Schema<any>): Promise<string[]>;
-    addColumn(db: SQL, schema: Schema<any>, name: string, type: string): Promise<void>;
-    dropColumn(db: SQL, schema: Schema<any>, name: string): Promise<void>;
-    upsert<T extends Record<string, any>>(db: SQL, schema: Schema<T>, data: T, conflictColumn: keyof T): Promise<T | undefined>;
+    createTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+    getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]>;
+    addColumn(db: SQL, schema: DbSchema<any>, name: string, type: string): Promise<void>;
+    dropColumn(db: SQL, schema: DbSchema<any>, name: string): Promise<void>;
+    upsert<T extends Record<string, any>>(db: SQL, schema: DbSchema<T>, data: T, conflictColumn: keyof T): Promise<T | undefined>;
     listTables(db: SQL): Promise<string[]>;
-    dropTable(db: SQL, schema: Schema<any>): Promise<void>;
-    truncateTable(db: SQL, schema: Schema<any>): Promise<void>;
-    getTableStats(db: SQL, schema: Schema<any>): Promise<TableStats>;
-    getTableIndices(db: SQL, schema: Schema<any>): Promise<any[]>;
-    getTableSchema(db: SQL, schema: Schema<any>): Promise<any[]>;
-    getTableData(db: SQL, schema: Schema<any>, limit: number, offset: number): Promise<any[]>;
-    optimize(db: SQL, schema: Schema<any>): Promise<void>;
+    dropTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+    truncateTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+    getTableStats(db: SQL, schema: DbSchema<any>): Promise<TableStats>;
+    getTableIndices(db: SQL, schema: DbSchema<any>): Promise<any[]>;
+    getTableSchema(db: SQL, schema: DbSchema<any>): Promise<any[]>;
+    getTableData(db: SQL, schema: DbSchema<any>, limit: number, offset: number): Promise<any[]>;
+    optimize(db: SQL, schema: DbSchema<any>): Promise<void>;
 }
 
-declare class Schema<T extends Record<string, any>> {
+declare class DbSchema<T extends Record<string, any>> {
     readonly table: string;
     private readonly definitions;
     readonly dialect: DbDialectAdapter;
     constructor(table: string, definitions: Record<keyof T, Column>, dialect: DbDialectAdapter);
     entries(): Array<[string, Column]>;
-    withDialect(dialect: DbDialectAdapter): Schema<T>;
+    withDialect(dialect: DbDialectAdapter): DbSchema<T>;
     createSQL(adapter?: DbDialectAdapter): string;
     columnDefinitions(adapter?: DbDialectAdapter): Record<string, string>;
     get columns(): {
@@ -1002,8 +1009,8 @@ declare class Schema<T extends Record<string, any>> {
 /** Shared inspection API; SQL-specific operations live in the dialect adapter. */
 declare class DbInspector<T extends Record<string, any>> {
     private readonly db;
-    readonly schema: Schema<T>;
-    constructor(db: SQL, schema: Schema<T>);
+    readonly schema: DbSchema<T>;
+    constructor(db: SQL, schema: DbSchema<T>);
     listTables(): Promise<string[]>;
     dropTable(): Promise<void>;
     truncateTable(): Promise<void>;
@@ -1012,8 +1019,8 @@ declare class DbInspector<T extends Record<string, any>> {
     getTableSchema(): Promise<any[]>;
     getTableData(limit?: number, offset?: number): Promise<any[]>;
     optimize(): Promise<void>;
-    static sqlite<T extends Record<string, any>>(db: SQL, schema: Schema<T>): DbInspector<T>;
-    static postgres<T extends Record<string, any>>(db: SQL, schema: Schema<T>): DbInspector<T>;
+    static sqlite<T extends Record<string, any>>(db: SQL, schema: DbSchema<T>): DbInspector<T>;
+    static postgres<T extends Record<string, any>>(db: SQL, schema: DbSchema<T>): DbInspector<T>;
 }
 
 type Where<T> = {
@@ -1025,8 +1032,8 @@ type Where<T> = {
 /** Shared CRUD repository. Dialect-specific statements are delegated to its adapter. */
 declare class DbRepository<T extends Record<string, any>> {
     private readonly db;
-    readonly schema: Schema<T>;
-    constructor(db: SQL, schema: Schema<T>);
+    readonly schema: DbSchema<T>;
+    constructor(db: SQL, schema: DbSchema<T>);
     private get dialect();
     get inspect(): DbInspector<T>;
     withContext(context: SQL): DbRepository<T>;
@@ -1179,6 +1186,28 @@ interface CsrfOptions {
  */
 declare const csrf: (options?: CsrfOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
+type DenyConfig = ErrorConfig & {
+    /** When provided, the guard denies only requests where the predicate returns true; otherwise it continues. */
+    when?: (ctx: ctx) => boolean | Promise<boolean>;
+};
+/**
+ * Rejects requests with an HTTP error, optionally only when a predicate matches.
+ *
+ * Without `when` every request is denied, which is useful for maintenance
+ * windows or permanently closing a route. With `when`, non-matching requests
+ * continue through the remaining guards and the handler.
+ *
+ * ```ts
+ * @use(deny())                                            // always 403
+ * @use(deny({ code: 503, message: "Under maintenance" })) // custom status
+ * @use(deny({ when: (ctx) => ctx.req.method === "TRACE" })) // conditional
+ * ```
+ *
+ * @param options - Optional status, message, headers, redirect, and predicate.
+ * @returns A guard factory that denies matching requests and continues otherwise.
+ */
+declare const deny: (options?: DenyConfig | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+
 interface ErrorGuardOptions {
     /** Log caught errors. Defaults to false. */
     logErrors?: boolean;
@@ -1219,26 +1248,384 @@ type IpOptions = {
  */
 declare const ipFilter: (options?: IpOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
-declare class SchemaBuilder<T extends Record<string, any>> {
-    private schema;
-    private rules;
-    private defaults;
-    string(key: keyof T, defaultValue?: T[keyof T]): this;
-    number(key: keyof T, defaultValue?: T[keyof T]): this;
-    boolean(key: keyof T, defaultValue?: T[keyof T]): this;
-    min(key: keyof T, val: number): this;
-    max(key: keyof T, val: number): this;
-    email(key: keyof T): this;
-    private addRule;
-    private noBool;
-    private noKey;
-    validate(data: any): {
-        errors: string[];
-        processedData: any;
-    };
-    private validateObject;
+/**
+ * TypeScript types for the
+ * {@link https://standardschema.dev/ | Standard Schema} and
+ * Standard JSON Schema interfaces.
+ *
+ * They mirror the vendor-neutral contracts consumed by the MCP SDK. Keeping
+ * local copies avoids a runtime dependency on the SDK from the schema library.
+ */
+/** A single property key or named path segment in an issue path. */
+type StandardPathSegment = PropertyKey | {
+    readonly key: PropertyKey;
+};
+/** One validation problem in the Standard Schema shape. */
+interface StandardIssue {
+    /** Human-readable explanation of the failure. */
+    readonly message: string;
+    /** Location of the failing value inside nested data. */
+    readonly path?: ReadonlyArray<StandardPathSegment> | undefined;
 }
-declare function z<T extends Record<string, any>>(): SchemaBuilder<T>;
+/** Successful validation result. */
+interface StandardSuccessResult<Output> {
+    /** Parsed and normalized output value. */
+    readonly value: Output;
+    readonly issues?: undefined;
+}
+/** Failed validation result. */
+interface StandardFailureResult {
+    /** Every problem found while validating the input. */
+    readonly issues: ReadonlyArray<StandardIssue>;
+}
+/** Discriminated union returned by `~standard.validate`. */
+type StandardValidateResult<Output> = StandardSuccessResult<Output> | StandardFailureResult;
+/** Options passed to `~standard.validate`. */
+interface StandardValidateOptions {
+    /** Extra options for the producing library; unused by Rossa schemas. */
+    readonly libraryOptions?: Record<string, unknown> | undefined;
+}
+/** JSON Schema dialect requested by a consumer. */
+type StandardJSONSchemaTarget = "draft-2020-12" | "draft-07" | "openapi-3.0" | (object & string);
+/** Options passed to the `~standard.jsonSchema` converters. */
+interface StandardJSONSchemaOptions {
+    /** Target dialect. Rossa emits the same subset for every target. */
+    readonly target?: StandardJSONSchemaTarget | undefined;
+    /** Extra options for the producing library; unused by Rossa schemas. */
+    readonly libraryOptions?: Record<string, unknown> | undefined;
+}
+/** Converters that advertise a schema's wire shape as JSON Schema. */
+interface StandardJSONSchemaConverter {
+    /** JSON Schema describing accepted input values. */
+    readonly input: (options: StandardJSONSchemaOptions) => Record<string, unknown>;
+    /** JSON Schema describing produced output values. */
+    readonly output: (options: StandardJSONSchemaOptions) => Record<string, unknown>;
+}
+/** Phantom input/output type pair exposed through `~standard.types`. */
+interface StandardTypes<Input = unknown, Output = Input> {
+    readonly input: Input;
+    readonly output: Output;
+}
+/** Properties attached to every schema under the `~standard` key. */
+interface StandardSchemaProps<Input = unknown, Output = Input> {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly types?: StandardTypes<Input, Output> | undefined;
+    readonly validate: (value: unknown, options?: StandardValidateOptions | undefined) => StandardValidateResult<Output>;
+    readonly jsonSchema: StandardJSONSchemaConverter;
+}
+/** Any value implementing the Standard Schema contract. */
+interface StandardSchema<Input = unknown, Output = Input> {
+    readonly "~standard": StandardSchemaProps<Input, Output>;
+}
+
+/**
+ * A single validation problem found while parsing a value.
+ *
+ * `path` identifies the failing location in nested data (for example
+ * `["address", "city"]` or `["tags", 0]`), while `message` is a human-friendly
+ * explanation written for API consumers.
+ */
+type Issue = {
+    path: (string | number)[];
+    message: string;
+};
+/** Result of a successful {@link Schema.safeParse} call. */
+type SafeParseSuccess<T> = {
+    success: true;
+    data: T;
+};
+/** Result of a failed {@link Schema.safeParse} call. */
+type SafeParseFailure = {
+    success: false;
+    error: SchemaError;
+};
+/** Discriminated union returned by {@link Schema.safeParse}. */
+type SafeParseResult<T> = SafeParseSuccess<T> | SafeParseFailure;
+/**
+ * Error thrown by {@link Schema.parse} when validation fails.
+ *
+ * Inspect `issues` for structured, path-aware details, or read `message` for a
+ * short joined summary.
+ */
+declare class SchemaError extends Error {
+    /** Structured validation problems, in the order they were discovered. */
+    readonly issues: Issue[];
+    constructor(issues: Issue[]);
+}
+/**
+ * Any schema, regardless of its output type. Useful for guard options and for
+ * accepting schemas whose exact output is not important.
+ */
+type AnySchema = Schema<unknown>;
+/** Resolve the output type carried by a schema. */
+type InferSchema<S> = S extends Schema<infer Output> ? Output : never;
+/** Internal, cloneable flags shared by every schema. */
+interface SchemaState {
+    optional: boolean;
+    nullable: boolean;
+    hasDefault: boolean;
+    defaultValue: unknown;
+}
+/**
+ * Base class for every schema.
+ *
+ * It owns the shared modifier flags (`.optional()`, `.nullable()`, `.default()`)
+ * and the parse/safeParse entry points. Concrete schemas implement `_clone` and
+ * `_validate`. All modifier methods return fresh instances, so a schema value
+ * can be safely reused in multiple chains.
+ */
+declare abstract class Schema<Output> {
+    /** Phantom output type used by `z.infer`. */
+    readonly _output: Output;
+    /**
+     * Standard Schema and Standard JSON Schema interface.
+     *
+     * This is the vendor-neutral contract used by the MCP SDK's `registerTool`
+     * and `registerPrompt`. `validate` runs the same pipeline as
+     * {@link Schema.safeParse}; `jsonSchema` advertises the wire shape.
+     */
+    readonly "~standard": StandardSchemaProps<unknown, Output>;
+    protected readonly _state: SchemaState;
+    constructor(state?: SchemaState);
+    /** Create a fresh copy of this schema, including its modifier flags. */
+    protected abstract _clone(): this;
+    /** Validate a defined, non-null value and return the parsed output. */
+    protected abstract _validate(value: unknown, path: (string | number)[], issues: Issue[]): Output | undefined;
+    /**
+     * Render this schema as JSON Schema.
+     *
+     * The result uses a subset that is valid for draft-07 and draft-2020-12.
+     * Unknown top-level input keys are described with
+     * `additionalProperties: false`; the requested target is ignored.
+     */
+    toJSONSchema(options?: StandardJSONSchemaOptions): Record<string, unknown>;
+    /**
+     * Implement each concrete schema's JSON Schema mapping.
+     *
+     * @internal
+     */
+    protected abstract _jsonSchema(options: StandardJSONSchemaOptions): Record<string, unknown>;
+    /**
+     * Whether the field must appear in an object's `required` list.
+     *
+     * Fields with `.optional()` or `.default(...)` are not required.
+     *
+     * @internal
+     */
+    _isRequired(): boolean;
+    /** Return a copy that also accepts `undefined` (a missing key is allowed). */
+    optional(): Schema<Output | undefined>;
+    /** Return a copy that also accepts `null`, but still rejects `undefined`. */
+    nullable(): Schema<Output | null>;
+    /**
+     * Return a copy that substitutes `value` when the input is `undefined`.
+     * The same default reference is used for every parse.
+     */
+    default(value: Exclude<Output, undefined>): Schema<Exclude<Output, undefined>>;
+    /**
+     * Shared handling for `undefined`, `null`, and defaults before a concrete
+     * schema runs its own type checks.
+     *
+     * @internal
+     */
+    _run(value: unknown, path: (string | number)[], issues: Issue[]): Output | undefined;
+    /**
+     * Validate a value without throwing.
+     *
+     * Unknown object keys are stripped from the returned data. On failure the
+     * result contains a {@link SchemaError} with every collected issue.
+     */
+    safeParse(data: unknown): SafeParseResult<Output>;
+    /**
+     * Validate a value and return the parsed output.
+     *
+     * @throws {SchemaError} When the input does not satisfy this schema.
+     */
+    parse(data: unknown): Output;
+}
+
+type StringRule = {
+    kind: "min";
+    value: number;
+} | {
+    kind: "max";
+    value: number;
+} | {
+    kind: "email";
+} | {
+    kind: "trim";
+};
+type NumberRule = {
+    kind: "min";
+    value: number;
+} | {
+    kind: "max";
+    value: number;
+} | {
+    kind: "int";
+};
+interface StringOptions {
+    coerce?: boolean;
+    rules?: StringRule[];
+    state?: SchemaState;
+}
+interface NumberOptions {
+    coerce?: boolean;
+    rules?: NumberRule[];
+    state?: SchemaState;
+}
+interface BooleanOptions {
+    coerce?: boolean;
+    state?: SchemaState;
+}
+/** Schema for text values, with `.min`, `.max`, and `.email` rules. */
+declare class StringSchema extends Schema<string> {
+    private readonly _rules;
+    private readonly _coerce;
+    constructor(options?: StringOptions);
+    protected _clone(): this;
+    /** Require at least `length` characters. */
+    min(length: number): this;
+    /** Require at most `length` characters. */
+    max(length: number): this;
+    /** Require a conventional email address (`local@domain.tld`). */
+    email(): this;
+    /**
+     * Trim leading and trailing whitespace before validation.
+     *
+     * `.min`, `.max`, and `.email` see the trimmed value, and the parsed output
+     * is trimmed.
+     */
+    trim(): this;
+    private _withRule;
+    protected _jsonSchema(_options: StandardJSONSchemaOptions): Record<string, unknown>;
+    protected _validate(value: unknown, path: (string | number)[], issues: Issue[]): string | undefined;
+}
+/** Schema for numeric values, with `.min`, `.max`, and `.int` rules. */
+declare class NumberSchema extends Schema<number> {
+    private readonly _rules;
+    private readonly _coerce;
+    constructor(options?: NumberOptions);
+    protected _clone(): this;
+    /** Require a value greater than or equal to `minimum`. */
+    min(minimum: number): this;
+    /** Require a value less than or equal to `maximum`. */
+    max(maximum: number): this;
+    /** Require a whole number. */
+    int(): this;
+    private _withRule;
+    protected _jsonSchema(_options: StandardJSONSchemaOptions): Record<string, unknown>;
+    protected _validate(value: unknown, path: (string | number)[], issues: Issue[]): number | undefined;
+}
+/** Schema for boolean values. */
+declare class BooleanSchema extends Schema<boolean> {
+    private readonly _coerce;
+    constructor(options?: BooleanOptions);
+    protected _clone(): this;
+    protected _jsonSchema(_options: StandardJSONSchemaOptions): Record<string, unknown>;
+    protected _validate(value: unknown, path: (string | number)[], issues: Issue[]): boolean | undefined;
+}
+
+/** A map of field names to schemas. */
+type Shape = Record<string, AnySchema>;
+type OptionalShapeKeys<TShape extends Shape> = {
+    [K in keyof TShape]: undefined extends InferSchema<TShape[K]> ? K : never;
+}[keyof TShape];
+/** Output type produced by an object schema, with optional fields preserved. */
+type InferShape<TShape extends Shape> = {
+    [K in Exclude<keyof TShape, OptionalShapeKeys<TShape>>]: InferSchema<TShape[K]>;
+} & {
+    [K in OptionalShapeKeys<TShape>]?: Exclude<InferSchema<TShape[K]>, undefined>;
+};
+type ArrayRule = {
+    kind: "min";
+    value: number;
+} | {
+    kind: "max";
+    value: number;
+};
+interface ArrayOptions {
+    rules?: ArrayRule[];
+    state?: SchemaState;
+}
+/** Schema for arrays whose items share a single item schema. */
+declare class ArraySchema<Item extends AnySchema> extends Schema<InferSchema<Item>[]> {
+    private readonly _item;
+    private readonly _rules;
+    constructor(item: Item, options?: ArrayOptions);
+    protected _clone(): this;
+    /** Require at least `length` items. */
+    min(length: number): this;
+    /** Require at most `length` items. */
+    max(length: number): this;
+    private _withRule;
+    protected _jsonSchema(options: StandardJSONSchemaOptions): Record<string, unknown>;
+    protected _validate(value: unknown, path: (string | number)[], issues: Issue[]): InferSchema<Item>[] | undefined;
+}
+interface ObjectOptions {
+    state?: SchemaState;
+}
+/**
+ * Schema for objects with a fixed shape.
+ *
+ * Unknown input keys are stripped from the parsed output (zod `.strip()`
+ * behavior).
+ */
+declare class ObjectSchema<TShape extends Shape> extends Schema<InferShape<TShape>> {
+    /** Field schemas keyed by output property name. */
+    readonly shape: TShape;
+    constructor(shape: TShape, options?: ObjectOptions);
+    protected _clone(): this;
+    protected _jsonSchema(options: StandardJSONSchemaOptions): Record<string, unknown>;
+    protected _validate(value: unknown, path: (string | number)[], issues: Issue[]): InferShape<TShape> | undefined;
+}
+
+/** Create a text schema. */
+declare const string: () => StringSchema;
+/** Create a numeric schema. */
+declare const number: () => NumberSchema;
+/** Create a boolean schema. */
+declare const boolean: () => BooleanSchema;
+/** Create an array schema for the given item schema. */
+declare const array: <Item extends AnySchema>(item: Item) => ArraySchema<Item>;
+/** Create an object schema with a fixed shape. */
+declare const object: <TShape extends Shape>(shape: TShape) => ObjectSchema<TShape>;
+/**
+ * Coercing variants that convert raw query/form strings before validation.
+ * Non-string inputs pass through to the underlying type checks.
+ */
+declare const coerce: {
+    /** Create a text schema that stringifies numbers and booleans. */
+    string: () => StringSchema;
+    /** Create a numeric schema that converts numeric strings with `Number()`. */
+    number: () => NumberSchema;
+    /**
+     * Create a boolean schema that accepts `"true"`/`"1"` and
+     * `"false"`/`"0"` case-insensitively.
+     */
+    boolean: () => BooleanSchema;
+};
+/**
+ * Resolve the output type of a schema.
+ *
+ * ```ts
+ * const User = z.object({ name: z.string() });
+ * type User = z.infer<typeof User>; // { name: string }
+ * ```
+ */
+type Infer<S extends AnySchema> = InferSchema<S>;
+
+declare const z_d_array: typeof array;
+declare const z_d_boolean: typeof boolean;
+declare const z_d_coerce: typeof coerce;
+declare const z_d_number: typeof number;
+declare const z_d_object: typeof object;
+declare const z_d_string: typeof string;
+declare namespace z_d {
+  export { z_d_array as array, z_d_boolean as boolean, z_d_coerce as coerce, z_d_number as number, z_d_object as object, z_d_string as string };
+  export type { Infer as infer };
+}
 
 declare const DEFAULT_MAX_SIZE: number;
 /**
@@ -1248,7 +1635,7 @@ declare const DEFAULT_MAX_SIZE: number;
  * @param schema - Schema used to validate the parsed JSON object.
  * @returns A guard factory that accepts a schema and optional error config.
  */
-declare const json: (options?: SchemaBuilder<any> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const json: (options?: AnySchema | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 interface RequireKeysOptions {
     keys: string[];
 }
@@ -1264,6 +1651,12 @@ declare const keys: (options?: string[] | undefined, overrideConfig?: BaseConfig
 type JwtPayload<T> = T & {
     iat: number;
     exp: number;
+    /**
+     * Unique token identifier assigned on every signature.
+     *
+     * Optional only so tokens issued before this claim existed remain readable.
+     */
+    jti?: string;
 };
 
 /**
@@ -1365,11 +1758,15 @@ declare const loggerFN: (options?: ((ff: logFN) => any) | undefined, overrideCon
  */
 declare const multipart: (options?: void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
-interface QueryValidationOptions<T extends Record<string, any>> {
-    schema: SchemaBuilder<T>;
+/** Options accepted by {@link validateQuery}. */
+interface QueryValidationOptions {
+    /** Schema used to validate and coerce query parameters. */
+    schema: AnySchema;
 }
-interface FormValidationOptions<T extends Record<string, any>> {
-    schema: SchemaBuilder<T>;
+/** Options accepted by {@link validateForm}. */
+interface FormValidationOptions {
+    /** Schema used to validate and coerce form fields. */
+    schema: AnySchema;
 }
 /**
  * Validates and coerces URL query parameters against a schema, then stores the
@@ -1378,7 +1775,7 @@ interface FormValidationOptions<T extends Record<string, any>> {
  * @param schema - Schema used to validate and coerce query values.
  * @returns A guard factory that accepts the schema and optional error config.
  */
-declare const validateQuery: (options?: SchemaBuilder<{}> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const validateQuery: (options?: AnySchema | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 /**
  * Validates multipart or URL-encoded form fields against a schema and stores
  * the processed result in `ctx.form`.
@@ -1386,7 +1783,7 @@ declare const validateQuery: (options?: SchemaBuilder<{}> | undefined, overrideC
  * @param schema - Schema used to validate and coerce form values.
  * @returns A guard factory that accepts the schema and optional error config.
  */
-declare const validateForm: (options?: SchemaBuilder<{}> | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const validateForm: (options?: AnySchema | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 interface RateLimitOptions {
     /** Maximum number of connections/requests allowed within the window. @default 100 */
@@ -1545,14 +1942,76 @@ interface SessionConfig {
  * @returns A guard factory that accepts a session service and optional error config.
  */
 declare const session: (options?: SessionAuthInterface | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
-
+/** Optional extra check applied to a session that `session()` already resolved. */
+type SessionValidator = (session: ServerSide) => boolean | Promise<boolean>;
 /**
- * Serves requests for file-like paths through the configured static file server.
- * Only GET and HEAD requests are intercepted.
+ * Rejects requests that do not carry a valid, stored session.
  *
+ * A session counts as authenticated only when the cookie signature is valid,
+ * the row still exists in the store, it has not expired, and it is not a
+ * freshly created anonymous session. Compose this guard after
+ * `session(service)` — it reads `ctx.session` and never loads the cookie
+ * itself:
+ *
+ * ```ts
+ * @use(session(service), requireSession())
+ * ```
+ *
+ * Pass a validator to add an application-level check, for example an identity
+ * field written during login. Session data keys are not part of the
+ * `ServerSide` type, so cast to your session shape:
+ *
+ * ```ts
+ * @use(session(service), requireSession((s) => typeof (s as AccountSession).userId === "number"))
+ * ```
+ *
+ * @param validator - Optional additional check for the resolved session.
+ * @returns A guard factory that returns 401 and continues otherwise.
+ */
+declare const requireSession: (options?: SessionValidator | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+
+/** Configuration for a {@link staticFiles} mount. */
+interface StaticFilesOptions {
+    /**
+     * Restricts this mount to request paths under the given prefix. The decoded
+     * pathname is compared at a path-segment boundary, so `/assets` matches
+     * `/assets` and `/assets/app.js` but not `/assetsfoo.png`. Requests outside
+     * the prefix fall through to the remaining guards and routes, which keeps
+     * authentication and route handling reachable. Omit it to intercept every
+     * file-like path, as a global static mount does.
+     */
+    prefix?: string;
+    /**
+     * Directory this mount serves from. Relative paths resolve against
+     * `process.cwd()`; absolute paths are used as-is. When set, the mount uses a
+     * dedicated static file server instead of the app-wide `clientPath` server.
+     * With a `prefix`, the prefix is stripped before the lookup, so
+     * `/files/logo.png` maps to `<root>/logo.png`. Without a prefix the full
+     * request path is used.
+     */
+    root?: string;
+    /**
+     * Additional file extensions recognized by this mount, with or without a
+     * leading dot. They extend the built-in extension list but do not replace
+     * the app-wide `fileExtensions` configuration.
+     */
+    extensions?: string[];
+}
+/**
+ * Serves requests for file-like paths through a static file server.
+ * Only GET and HEAD requests are intercepted; HEAD responses keep the file
+ * headers but drop the body.
+ *
+ * Without options it behaves like a global mount: every recognized file-like
+ * path is served from the app-wide `clientPath` server before route guards run.
+ * Pass `prefix` and/or `root` to scope a mount, for example
+ * `staticFiles({ prefix: "/files", root: "./private-files" })` registered
+ * behind an authentication guard.
+ *
+ * @param options - Optional prefix, root, and extension configuration.
  * @returns A guard factory that serves static assets before route handling.
  */
-declare const staticFiles: (options?: void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const staticFiles: (options?: StaticFilesOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 /**
  * Stops waiting for downstream work after the configured number of milliseconds.
@@ -1628,5 +2087,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, Field, ForeignKeyError, JWTAuthService, McpController, Methods, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaBuilder, Scope, ServerSide, SessionAuthInterface, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z };
-export type { AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, JWTConfig, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SanitizeOptions, SecurityHeadersOptions, SessionConfig, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
+export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };

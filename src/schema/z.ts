@@ -48,4 +48,6 @@ export const coerce = {
  * type User = z.infer<typeof User>; // { name: string }
  * ```
  */
-export type infer<S extends AnySchema> = InferSchema<S>;
+type Infer<S extends AnySchema> = InferSchema<S>;
+
+export type { Infer as infer };
