@@ -1,6 +1,6 @@
 import type { SQL } from "bun";
 import type { Column } from "../column";
-import type { Schema } from "../schema";
+import type { DbSchema } from "../schema";
 
 export type DbDialectName = "sqlite" | "postgres" | "mysql" | "mariadb";
 
@@ -20,22 +20,22 @@ export interface DbDialectAdapter {
   buildColumnType(column: Column): string;
   normalizeOperator(operator: string): string;
   version(db: SQL): Promise<string>;
-  createTable(db: SQL, schema: Schema<any>): Promise<void>;
-  getColumns(db: SQL, schema: Schema<any>): Promise<string[]>;
-  addColumn(db: SQL, schema: Schema<any>, name: string, type: string): Promise<void>;
-  dropColumn(db: SQL, schema: Schema<any>, name: string): Promise<void>;
+  createTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+  getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]>;
+  addColumn(db: SQL, schema: DbSchema<any>, name: string, type: string): Promise<void>;
+  dropColumn(db: SQL, schema: DbSchema<any>, name: string): Promise<void>;
   upsert<T extends Record<string, any>>(
     db: SQL,
-    schema: Schema<T>,
+    schema: DbSchema<T>,
     data: T,
     conflictColumn: keyof T,
   ): Promise<T | undefined>;
   listTables(db: SQL): Promise<string[]>;
-  dropTable(db: SQL, schema: Schema<any>): Promise<void>;
-  truncateTable(db: SQL, schema: Schema<any>): Promise<void>;
-  getTableStats(db: SQL, schema: Schema<any>): Promise<TableStats>;
-  getTableIndices(db: SQL, schema: Schema<any>): Promise<any[]>;
-  getTableSchema(db: SQL, schema: Schema<any>): Promise<any[]>;
-  getTableData(db: SQL, schema: Schema<any>, limit: number, offset: number): Promise<any[]>;
-  optimize(db: SQL, schema: Schema<any>): Promise<void>;
+  dropTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+  truncateTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+  getTableStats(db: SQL, schema: DbSchema<any>): Promise<TableStats>;
+  getTableIndices(db: SQL, schema: DbSchema<any>): Promise<any[]>;
+  getTableSchema(db: SQL, schema: DbSchema<any>): Promise<any[]>;
+  getTableData(db: SQL, schema: DbSchema<any>, limit: number, offset: number): Promise<any[]>;
+  optimize(db: SQL, schema: DbSchema<any>): Promise<void>;
 }

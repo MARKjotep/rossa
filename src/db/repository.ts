@@ -6,7 +6,7 @@ import {
   UniqueConstraintError,
 } from "./errors";
 import { DbInspector } from "./inspector";
-import { Schema } from "./schema";
+import { DbSchema } from "./schema";
 
 export type Where<T> = {
   [K in keyof T]?: T[K] | { operator: string; value: unknown };
@@ -31,7 +31,7 @@ const ALLOWED_OPERATORS = new Set([
 export class DbRepository<T extends Record<string, any>> {
   constructor(
     private readonly db: SQL,
-    public readonly schema: Schema<T>,
+    public readonly schema: DbSchema<T>,
   ) {}
 
   private get dialect(): DbDialectAdapter {

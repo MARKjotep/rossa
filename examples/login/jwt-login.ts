@@ -4,7 +4,7 @@ import {
   JWTAuthService,
   Methods,
   Rossa,
-  Schema,
+  DbSchema,
   jwtAuth,
   jwtRefresh,
   route,
@@ -29,7 +29,7 @@ type Claims = { userId: number; email: string };
 const db = new SQL(process.env.DATABASE_URL ?? "sqlite://login-jwt.sqlite");
 const users = new DbRepository(
   db,
-  new Schema<UserRow>(
+  new DbSchema<UserRow>(
     "users",
     {
       id: t.serial().primary,
@@ -41,7 +41,7 @@ const users = new DbRepository(
 );
 const refreshRows = new DbRepository(
   db,
-  new Schema<RefreshRow>(
+  new DbSchema<RefreshRow>(
     "refresh_tokens",
     {
       token: t.text().primary,

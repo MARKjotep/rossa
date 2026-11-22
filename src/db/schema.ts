@@ -1,7 +1,7 @@
 import type { Column } from "./column";
 import type { DbDialectAdapter } from "./dialects/dialect";
 
-export class Schema<T extends Record<string, any>> {
+export class DbSchema<T extends Record<string, any>> {
   constructor(
     public readonly table: string,
     private readonly definitions: Record<keyof T, Column>,
@@ -12,9 +12,9 @@ export class Schema<T extends Record<string, any>> {
     return Object.entries(this.definitions) as Array<[string, Column]>;
   }
 
-  withDialect(dialect: DbDialectAdapter): Schema<T> {
+  withDialect(dialect: DbDialectAdapter): DbSchema<T> {
     const definitions = Object.fromEntries(this.entries()) as Record<keyof T, Column>;
-    return new Schema(this.table, definitions, dialect);
+    return new DbSchema(this.table, definitions, dialect);
   }
 
   createSQL(adapter: DbDialectAdapter = this.dialect): string {

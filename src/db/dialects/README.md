@@ -2,7 +2,7 @@
 
 Each dialect is an adapter implementing [`DbDialectAdapter`](./dialect.ts).
 `DbRepository` keeps the shared CRUD and transaction API; the adapter owns SQL
-that varies by database, while `Schema` asks the adapter to render identifiers
+that varies by database, while `DbSchema` asks the adapter to render identifiers
 and logical column definitions.
 
 ## 1. Add an adapter module
@@ -16,7 +16,7 @@ import { sql, type SQL } from "bun";
 import type { Column } from "../column";
 import type { DbDialectAdapter } from "./dialect";
 import { quoteIdentifier, quoteTable } from "../identifier";
-import type { Schema } from "../schema";
+import type { DbSchema } from "../schema";
 
 export const exampleDialect: DbDialectAdapter = {
   name: "example",
@@ -38,7 +38,7 @@ export const exampleDialect: DbDialectAdapter = {
     // Return a database version string or throw a useful error.
     return "";
   },
-  async createTable(db: SQL, schema: Schema<any>) {
+  async createTable(db: SQL, schema: DbSchema<any>) {
     await db`${sql.unsafe(schema.createSQL(this))}`;
   },
   // Implement the remaining methods from DbDialectAdapter.
@@ -94,7 +94,7 @@ Update all of these locations:
 Then construct a schema with that adapter:
 
 ```ts
-const schema = new Schema<MyRow>("my_table", columns, exampleDialect);
+const schema = new DbSchema<MyRow>("my_table", columns, exampleDialect);
 const repository = new DbRepository<MyRow>(db, schema);
 ```
 

@@ -1,4 +1,4 @@
-import { DbRepository, type Schema } from "@/db";
+import { DbRepository, type DbSchema } from "@/db";
 import {
   SessionAuthInterface,
   type AuthConfig,
@@ -16,9 +16,9 @@ export class SessionAuthService<
   T extends session_db,
 > extends SessionAuthInterface {
   private _db: DbRepository<session_db>;
-  constructor(sql: SQL, schema: Schema<T>, config: AuthConfig, salt: string) {
+  constructor(sql: SQL, schema: DbSchema<T>, config: AuthConfig, salt: string) {
     super(config, salt);
-    this._db = new DbRepository<session_db>(sql, schema as Schema<session_db>);
+    this._db = new DbRepository<session_db>(sql, schema as DbSchema<session_db>);
   }
 
   public async init(): Promise<void> {

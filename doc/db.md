@@ -10,14 +10,14 @@ inspection, truncation, and optimization. See the
 
 ```ts
 import type { SQL } from "bun";
-import { DbRepository, Schema, sqliteDialect, t } from "@/db";
+import { DbRepository, DbSchema, sqliteDialect, t } from "@/db";
 
 interface UserRow {
   id: number;
   name: string;
 }
 
-const schema = new Schema<UserRow>(
+const schema = new DbSchema<UserRow>(
   "users",
   {
     id: t.serial().primary,

@@ -220,10 +220,12 @@ after the global pipeline.
 | `timeout(milliseconds)`     | Stops waiting after the limit and returns `408`. It cannot cancel work already running.                               |
 | `errorHandler(options?)`    | Catches thrown errors from downstream guards and handlers; returns a generic `500` unless `onError` is supplied.      |
 
-`schema` values are created with `z<T>()` or `SchemaBuilder<T>`. The builder
-supports `string`, `number`, and `boolean` fields, optional defaults, `min`,
-`max`, and `email` rules. Query and form guards coerce numeric and boolean
-strings; JSON validation checks parsed types.
+`schema` values are built with the zod-style `z` API: `z.object({ ... })`,
+`z.string()`, `z.number()`, `z.boolean()`, and `z.array(item)`, with `min`,
+`max`, `int`, `email`, `optional`, `nullable`, and `default` modifiers. Use
+`z.coerce.*` for query and form values, which arrive as strings. Unknown object
+keys are stripped from parsed output. See the schema helper section in the
+guards guide for examples.
 
 ### Custom guards
 
@@ -598,6 +600,27 @@ official SDK, not by Rossa. See the
 [official TypeScript SDK documentation](https://ts.sdk.modelcontextprotocol.io/v2/)
 for `McpServer.registerTool`, resource, and prompt authoring guides.
 
+Rossa's `z` schemas implement the
+[Standard Schema](https://standardschema.dev/) and Standard JSON Schema
+interfaces, so they can be passed directly to `server.registerTool` and
+`server.registerPrompt` without an adapter:
+
+```ts
+import { z } from "rossa";
+
+server.registerTool(
+  "echo",
+  {
+    description: "Echo text",
+    inputSchema: z.object({ text: z.string().trim().min(1) }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text }] }),
+);
+```
+
+The SDK uses `~standard.validate` to check incoming tool arguments and
+`~standard.jsonSchema.input` to advertise the argument shape in `tools/list`.
+
 ## Authentication
 
 Rossa provides building blocks. The application owns identity, storage, account
@@ -691,7 +714,7 @@ The database layer wraps Bun's SQL client with typed schemas, a repository, and
 dialect adapters. SQLite needs no additional driver.
 
 ```ts
-import { DbRepository, Schema, sqliteDialect, t } from "rossa";
+import { DbRepository, DbSchema, sqliteDialect, t } from "rossa";
 import type { SQL } from "bun";
 
 interface UserRow {
@@ -703,7 +726,7 @@ declare const db: SQL; // Bun SQL connection configured for SQLite
 
 const users = new DbRepository<UserRow>(
   db,
-  new Schema(
+  new DbSchema(
     "users",
     {
       id: t.serial().primary,
@@ -725,7 +748,7 @@ const rosa = await users.find({ name: "Rosa" });
 scale)`. A `Column` supports `.primary`, `.notNull`, `.unique`, `.defaultNow`,
 and `.default(value)`.
 
-`Schema<T>` combines a table name, typed column definitions, and a dialect. It
+`DbSchema<T>` combines a table name, typed column definitions, and a dialect. It
 can emit DDL (`createSQL`) and column definitions, and it exposes `columns` for
 type-safe references. The selected dialect maps logical types to native column
 types.

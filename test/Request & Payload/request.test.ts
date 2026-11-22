@@ -6,15 +6,15 @@ import { multipart } from "../../src/guard/multipart.guard";
 import { validateForm, validateQuery } from "../../src/guard/queries.guard";
 import { sanitize } from "../../src/guard/sanitize.guard";
 import { urlencoded } from "../../src/guard/urlencoded.guard";
-import { z } from "../../src/guard/json/schema.json";
+import { z } from "../../src/schema";
 import { jsonRequest, runGuard } from "../helpers";
 
 describe("request parsing and payload validation", () => {
   it("parses and validates JSON, enforces media type and byte limits", async () => {
-    const schema = z<{ name: string; count: number }>()
-      .string("name")
-      .min("name", 1)
-      .number("count");
+    const schema = z.object({
+      name: z.string().min(1),
+      count: z.number(),
+    });
     const guard = json(schema);
 
     const valid = await runGuard(
@@ -98,10 +98,10 @@ describe("request parsing and payload validation", () => {
   });
 
   it("coerces query values and validates the resulting schema", async () => {
-    const schema = z<{ page: number; enabled: boolean }>()
-      .number("page", 1)
-      .min("page", 1)
-      .boolean("enabled", false);
+    const schema = z.object({
+      page: z.coerce.number().min(1).default(1),
+      enabled: z.coerce.boolean().default(false),
+    });
     const guard = validateQuery(schema);
 
     const valid = await runGuard(
@@ -118,14 +118,14 @@ describe("request parsing and payload validation", () => {
     expect(invalid.response.status).toBe(400);
 
     const repeatedValues = await runGuard(
-      validateQuery(z<{ id: number }>().number("id")),
+      validateQuery(z.object({ id: z.coerce.number() })),
       new Request("http://localhost/search?id=1&id=2"),
     );
     expect((repeatedValues.context.query as any).id).toBe(2);
   });
 
   it("validates schema types before rules and uses a literal dot in email rules", async () => {
-    const emailSchema = z<{ email: string }>().string("email").email("email");
+    const emailSchema = z.object({ email: z.string().email() });
     const validEmail = await runGuard(
       json(emailSchema),
       jsonRequest("http://localhost/users", { email: "a@example.com" }),
@@ -139,7 +139,7 @@ describe("request parsing and payload validation", () => {
     expect(invalidEmail.response.status).toBe(400);
 
     const mismatchedType = await runGuard(
-      json(z<{ count: number }>().number("count").min("count", 1)),
+      json(z.object({ count: z.number().min(1) })),
       jsonRequest("http://localhost/users", { count: true }),
     );
     expect(mismatchedType.response.status).toBe(400);
@@ -174,7 +174,7 @@ describe("request parsing and payload validation", () => {
       tag: ["one", "two"],
     });
 
-    const schema = z<{ page: number }>().number("page");
+    const schema = z.object({ page: z.coerce.number() });
     const validated = await runGuard(
       validateForm(schema),
       new Request("http://localhost/form", {

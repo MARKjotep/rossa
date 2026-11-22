@@ -2,7 +2,7 @@ import { sql, type SQL } from "bun";
 import type { Column } from "../column";
 import type { DbDialectAdapter, DbDialectName, TableStats } from "./dialect";
 import { tableParts } from "../identifier";
-import type { Schema } from "../schema";
+import type { DbSchema } from "../schema";
 
 const quoteIdentifier = (name: string): string => {
   if (!name || name.includes("\0")) {
@@ -20,7 +20,7 @@ const quoteTable = (value: string) => {
     );
   return parts.map(quoteIdentifier).join(".");
 };
-const tableFragment = (schema: Schema<any>) =>
+const tableFragment = (schema: DbSchema<any>) =>
   sql.unsafe(quoteTable(schema.table));
 
 function renderType(column: Column): string {
@@ -67,7 +67,7 @@ function renderColumn(name: string, column: Column): string {
     .join(" ");
 }
 
-async function getColumns(db: SQL, schema: Schema<any>): Promise<string[]> {
+async function getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]> {
   const [database, table] = tableParts(schema.table);
   const rows = database
     ? await db<
@@ -124,7 +124,7 @@ function makeMysqlDialect(name: DbDialectName): DbDialectAdapter {
     },
     async upsert<T extends Record<string, any>>(
       db: SQL,
-      schema: Schema<T>,
+      schema: DbSchema<T>,
       data: T,
       conflictColumn: keyof T,
     ) {

@@ -2,9 +2,9 @@ import { sql, type SQL } from "bun";
 import type { Column } from "../column";
 import type { DbDialectAdapter, TableStats } from "./dialect";
 import { quoteIdentifier, quoteTable, tableParts } from "../identifier";
-import type { Schema } from "../schema";
+import type { DbSchema } from "../schema";
 
-function tableFragment(schema: Schema<any>) {
+function tableFragment(schema: DbSchema<any>) {
   return sql.unsafe(quoteTable(schema.table));
 }
 
@@ -51,7 +51,7 @@ function renderColumn(name: string, column: Column): string {
     .join(" ");
 }
 
-async function getColumns(db: SQL, schema: Schema<any>): Promise<string[]> {
+async function getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]> {
   const [schemaName, tableName] = tableParts(schema.table);
   const rows = schemaName
     ? await db<{ column_name: string }[]>`
@@ -109,7 +109,7 @@ export const postgresDialect: DbDialectAdapter = {
   },
   async upsert<T extends Record<string, any>>(
     db: SQL,
-    schema: Schema<T>,
+    schema: DbSchema<T>,
     data: T,
     conflictColumn: keyof T,
   ) {

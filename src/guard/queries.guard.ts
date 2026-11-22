@@ -1,14 +1,18 @@
 import { createGuard } from "./@/base.guard";
 import { sendError } from "@/http/res";
-import { coerceRawObject, type SchemaBuilder } from "./json/schema.json";
+import type { AnySchema } from "@/schema";
 import { formDataToObject } from "./shared/form-data.util";
 
-export interface QueryValidationOptions<T extends Record<string, any>> {
-  schema: SchemaBuilder<T>;
+/** Options accepted by {@link validateQuery}. */
+export interface QueryValidationOptions {
+  /** Schema used to validate and coerce query parameters. */
+  schema: AnySchema;
 }
 
-export interface FormValidationOptions<T extends Record<string, any>> {
-  schema: SchemaBuilder<T>;
+/** Options accepted by {@link validateForm}. */
+export interface FormValidationOptions {
+  /** Schema used to validate and coerce form fields. */
+  schema: AnySchema;
 }
 
 /**
@@ -18,12 +22,12 @@ export interface FormValidationOptions<T extends Record<string, any>> {
  * @param schema - Schema used to validate and coerce query values.
  * @returns A guard factory that accepts the schema and optional error config.
  */
-export const validateQuery = createGuard<SchemaBuilder<{}>>(
+export const validateQuery = createGuard<AnySchema>(
   async (ctx, next, _schema, errorConfig) => {
-    // 1. Normalize Options (Accepts raw SchemaBuilder or options object)
+    // 1. Normalize Options (Accepts a raw schema or options object)
     const schema = _schema;
 
-    if (!schema || typeof schema.validate !== "function") {
+    if (typeof schema?.safeParse !== "function") {
       return sendError({
         code: 500,
         message: "Framework Error: Missing schema in validateQuery guard.",
@@ -45,24 +49,25 @@ export const validateQuery = createGuard<SchemaBuilder<{}>>(
     }
 
     // 3. Extract Raw Query Parameters
-    const rawQuery: Record<string, any> = Object.create(null);
+    const rawQuery: Record<string, unknown> = Object.create(null);
     urlObj.searchParams.forEach((val, key) => {
       rawQuery[key] = val;
     });
 
-    // 4. Type Coercion & Schema Validation
-    const coercedData = coerceRawObject(rawQuery, schema);
-    const { errors, processedData } = schema.validate(coercedData);
+    // 4. Schema Validation & Coercion
+    const result = schema.safeParse(rawQuery);
 
-    if (errors.length > 0) {
+    if (!result.success) {
       return sendError({
         code: errorConfig.code ?? 400,
-        message: `Query Validation Error: ${errors.join("; ")}`,
+        message: `Query Validation Error: ${result.error.issues
+          .map((issue) => issue.message)
+          .join("; ")}`,
       });
     }
 
     // 5. Attach Validated & Coerced Data to Context
-    ctx.query = processedData;
+    ctx.query = result.data as typeof ctx.query;
 
     return await next();
   },
@@ -80,12 +85,12 @@ export const validateQuery = createGuard<SchemaBuilder<{}>>(
  * @param schema - Schema used to validate and coerce form values.
  * @returns A guard factory that accepts the schema and optional error config.
  */
-export const validateForm = createGuard<SchemaBuilder<{}>>(
+export const validateForm = createGuard<AnySchema>(
   async (ctx, next, _schema, errorConfig) => {
-    // 1. Normalize Options (Accepts raw SchemaBuilder or options object)
+    // 1. Normalize Options (Accepts a raw schema or options object)
     const schema = _schema;
 
-    if (!schema || typeof schema.validate !== "function") {
+    if (typeof schema?.safeParse !== "function") {
       return sendError({
         code: 500,
         message: "Framework Error: Missing schema in validateForm guard.",
@@ -93,7 +98,7 @@ export const validateForm = createGuard<SchemaBuilder<{}>>(
     }
 
     // 2. Safely Parse Form Payload
-    let rawForm: Record<string, any>;
+    let rawForm: Record<string, unknown>;
     try {
       const formData = await ctx.req.form();
       rawForm = formDataToObject(formData);
@@ -104,19 +109,20 @@ export const validateForm = createGuard<SchemaBuilder<{}>>(
       });
     }
 
-    // 3. Type Coercion & Schema Validation
-    const coercedData = coerceRawObject(rawForm, schema);
-    const { errors, processedData } = schema.validate(coercedData);
+    // 3. Schema Validation & Coercion
+    const result = schema.safeParse(rawForm);
 
-    if (errors.length > 0) {
+    if (!result.success) {
       return sendError({
         code: errorConfig.code ?? 400,
-        message: `Form Validation Error: ${errors.join("; ")}`,
+        message: `Form Validation Error: ${result.error.issues
+          .map((issue) => issue.message)
+          .join("; ")}`,
       });
     }
 
     // 4. Attach Validated & Coerced Data to Context
-    ctx.form = processedData;
+    ctx.form = result.data as typeof ctx.form;
 
     return await next();
   },

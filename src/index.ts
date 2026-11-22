@@ -54,7 +54,7 @@ export * from "./guard/timeout.guard";
 export * from "./guard/types.guard";
 export * from "./guard/url.guard";
 export * from "./guard/urlencoded.guard";
-export { SchemaBuilder, z } from "./guard/json/schema.json";
+export * from "./schema";
 
 export { JWTAuthService } from "./auth/jwt/jwt-service";
 export type { JWTConfig, JwtRefreshTokenStore } from "./auth/jwt/jwt-service";

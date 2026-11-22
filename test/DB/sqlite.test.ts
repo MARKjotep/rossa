@@ -8,7 +8,7 @@ import {
 } from "bun:test";
 import { SQL } from "bun";
 import type { SQL as SQLClient } from "bun";
-import { DbRepository, Schema, sqliteDialect, t } from "@/db";
+import { DbRepository, DbSchema, sqliteDialect, t } from "@/db";
 
 interface UserRow {
   id: number;
@@ -21,7 +21,7 @@ describe("DbRepository with SQLite", () => {
 
   beforeAll(async () => {
     db = new SQL(":memory:", { max: 1 });
-    const schema = new Schema<UserRow>(
+    const schema = new DbSchema<UserRow>(
       "users",
       {
         id: t.serial().primary,
@@ -89,7 +89,7 @@ describe("DbRepository with SQLite", () => {
     }
     const expanded = new DbRepository(
       db,
-      new Schema<UserWithNickname>(
+      new DbSchema<UserWithNickname>(
         "users",
         {
           id: t.serial().primary,

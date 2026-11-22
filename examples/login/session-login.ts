@@ -3,7 +3,7 @@ import {
   DbRepository,
   Methods,
   Rossa,
-  Schema,
+  DbSchema,
   ServerSide,
   SessionAuthInterface,
   route,
@@ -30,7 +30,7 @@ const db = new SQL(
 );
 const users = new DbRepository(
   db,
-  new Schema<UserRow>(
+  new DbSchema<UserRow>(
     "users",
     {
       id: t.serial().primary,
@@ -44,7 +44,7 @@ const users = new DbRepository(
 class SqliteSessions extends SessionAuthInterface {
   private readonly rows = new DbRepository(
     db,
-    new Schema<SessionRow>(
+    new DbSchema<SessionRow>(
       "sessions",
       {
         id: t.text().primary,

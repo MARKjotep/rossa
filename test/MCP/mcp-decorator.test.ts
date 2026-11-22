@@ -1,10 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-  McpController,
-  McpServer,
-  Rossa,
-  mcp,
-} from "../../src/index";
+import { McpController, McpServer, Rossa, mcp } from "../../src/index";
 
 const PROTOCOL_HEADERS = {
   "content-type": "application/json",
@@ -48,9 +43,7 @@ function post(
 async function readJsonRpc(response: Response): Promise<any> {
   const text = await response.text();
   if (response.headers.get("content-type")?.includes("text/event-stream")) {
-    const frame = text
-      .split("\n")
-      .find((line) => line.startsWith("data: "));
+    const frame = text.split("\n").find((line) => line.startsWith("data: "));
     expect(frame).toBeDefined();
     return JSON.parse(frame!.slice("data: ".length));
   }
@@ -116,9 +109,9 @@ describe("MCP decorator controllers", () => {
     const listed = await post(app, LIST_TOOLS);
     expect(listed.status).toBe(200);
     const list = await readJsonRpc(listed);
-    expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(
-      ["decorated-echo"],
-    );
+    expect(
+      list.result.tools.map((tool: { name: string }) => tool.name),
+    ).toEqual(["decorated-echo"]);
   });
 
   it("accepts a controller instance and reads its decorator metadata", async () => {
@@ -139,9 +132,9 @@ describe("MCP decorator controllers", () => {
     const listed = await post(app, LIST_TOOLS, "/mcp-async");
     expect(listed.status).toBe(200);
     const list = await readJsonRpc(listed);
-    expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(
-      ["async-echo"],
-    );
+    expect(
+      list.result.tools.map((tool: { name: string }) => tool.name),
+    ).toEqual(["async-echo"]);
   });
 
   it("throws a clear error when a controller lacks the @mcp decorator", () => {

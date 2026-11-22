@@ -25,3 +25,10 @@ types
 # Private AI development documentation
 .ai/
 MASTERPLAN.md
+
+# MCP example runtime data
+examples/mcp/data/
+
+# WebSocket example runtime data
+examples/ws-group-chat/data/
+examples/ws-direct-message/data/

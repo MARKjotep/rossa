@@ -241,6 +241,11 @@ SDK's response; use `origin` or handle MCP CORS at a proxy.
 See the [MCP chapter](doc/features.md#mcp-model-context-protocol) and the
 [official TypeScript SDK docs](https://ts.sdk.modelcontextprotocol.io/v2/).
 
+For a runnable notes server backed by Rossa's SQLite repository, run
+`bun run examples/mcp/server.ts`. It exposes `add-note`, `list-notes`, and
+`search-notes`; see [`examples/mcp/README.md`](examples/mcp/README.md) for setup,
+Inspector, and curl examples.
+
 ## Test requests without starting a server
 
 `app.test(request)` runs a `Request` through the same router pipeline and

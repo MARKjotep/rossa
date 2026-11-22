@@ -1,12 +1,12 @@
 import type { SQL } from "bun";
-import type { Schema } from "./schema";
+import type { DbSchema } from "./schema";
 import { getDialect } from "./dialects/registry";
 
 /** Shared inspection API; SQL-specific operations live in the dialect adapter. */
 export class DbInspector<T extends Record<string, any>> {
   constructor(
     private readonly db: SQL,
-    public readonly schema: Schema<T>,
+    public readonly schema: DbSchema<T>,
   ) {}
 
   listTables(): Promise<string[]> {
@@ -47,11 +47,11 @@ export class DbInspector<T extends Record<string, any>> {
     return this.schema.dialect.optimize(this.db, this.schema);
   }
 
-  static sqlite<T extends Record<string, any>>(db: SQL, schema: Schema<T>) {
+  static sqlite<T extends Record<string, any>>(db: SQL, schema: DbSchema<T>) {
     return new DbInspector(db, schema.withDialect(getDialect("sqlite")));
   }
 
-  static postgres<T extends Record<string, any>>(db: SQL, schema: Schema<T>) {
+  static postgres<T extends Record<string, any>>(db: SQL, schema: DbSchema<T>) {
     return new DbInspector(db, schema.withDialect(getDialect("postgres")));
   }
 }

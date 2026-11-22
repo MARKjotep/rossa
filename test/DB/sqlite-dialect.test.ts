@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { SQL } from "bun";
 import type { SQL as SQLClient } from "bun";
 import { t } from "../../src/db/column";
-import { Schema } from "../../src/db/schema";
+import { DbSchema } from "../../src/db/schema";
 import { sqliteDialect } from "../../src/db/dialects/sqlite";
 
 interface DialectRow {
@@ -12,11 +12,11 @@ interface DialectRow {
 
 describe("SQLite dialect adapter", () => {
   let db: SQLClient;
-  let schema: Schema<DialectRow>;
+  let schema: DbSchema<DialectRow>;
 
   beforeEach(async () => {
     db = new SQL(":memory:", { max: 1 });
-    schema = new Schema<DialectRow>(
+    schema = new DbSchema<DialectRow>(
       "dialect_checks",
       {
         id: t.serial().primary,

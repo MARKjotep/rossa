@@ -78,7 +78,7 @@ avoid calling it more than once.
 | `cookies(name)` | Require a cookie | Continues when the named cookie exists in the request's `Cookie` header; returns 401 when it is missing. The value remains available through `ctx.req.cookies.get(name)`. |
 | `multipart()` | Multipart forms | Parses `multipart/form-data` into `ctx.form`; uploaded values remain `File` objects and repeated names become arrays. |
 | `urlencoded()` | HTML forms | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. |
-| `json(schema)` | JSON body | For POST, PUT, and PATCH, checks the content type and 1 MiB default size limit, parses and validates JSON, and puts the validated result on `ctx.req._json`. The schema must be a `SchemaBuilder`. |
+| `json(schema)` | JSON body | For POST, PUT, and PATCH, checks the content type and 1 MiB default size limit, parses and validates JSON, and puts the validated result on `ctx.req._json`. The schema must be a `z.object(...)` schema. |
 | `keys(names)` | Required body fields | Parses JSON with `ctx.req.json()`, checks top-level keys, then puts the body on `ctx.body`. It does not validate field types. |
 | `validateQuery(schema)` | Query validation | Coerces and validates query values, then stores the result in `ctx.query`. Duplicate query names are reduced to their last value. |
 | `validateForm(schema)` | Form validation | Parses and validates form values, then stores the result in `ctx.form`. Duplicate field names are reduced to their last value. |
@@ -245,8 +245,41 @@ The core server also has a final error handler for uncaught pipeline errors.
 
 ## Schema helper
 
-`rossa` exports `z<T>()` and `SchemaBuilder<T>`. The builder supports `string`,
-`number`, and `boolean` fields, optional defaults,
-`min`, `max`, and `email` rules. Query and form guards coerce numeric and
-boolean strings before validation; JSON validation checks the parsed types as
-provided.
+`rossa` exports a small zod-style `z` API. Build schemas with `z.string()`,
+`z.number()`, `z.boolean()`, `z.array(item)`, and `z.object(shape)`, then add
+`.min`, `.max`, `.int`, `.email`, `.trim()`, `.optional()`, `.nullable()`, or
+`.default(value)`. All modifiers return fresh schemas, so a base schema can be
+reused safely. `.trim()` normalizes strings before rules run and in the parsed
+output.
+
+```ts
+import { json, use, validateQuery, z } from "rossa";
+
+const createUserSchema = z.object({
+  name: z.string().min(1).max(64),
+  email: z.string().email(),
+  role: z.string().default("user"),
+});
+
+const pageSchema = z.object({
+  page: z.coerce.number().min(1).default(1),
+  enabled: z.coerce.boolean().default(false),
+});
+
+type CreateUser = z.infer<typeof createUserSchema>;
+
+@use(json(createUserSchema))
+class UserController {}
+
+// For a query route, use @use(validateQuery(pageSchema)).
+```
+
+`schema.parse(value)` returns parsed data or throws `SchemaError` with
+`issues` (`{ path, message }` entries). `schema.safeParse(value)` returns
+`{ success: true, data }` or `{ success: false, error }`. Use `z.coerce.*` for
+query and form values, which arrive as strings; an empty or non-numeric string
+is a validation error rather than `0`. Unknown object keys are stripped from
+the parsed output (zod `.strip()` behavior). JSON validation checks parsed
+types as provided unless you explicitly use `z.coerce.*`. Every schema also
+implements the Standard Schema contract (`~standard`) and exposes
+`toJSONSchema()`, so the same values can be handed to tools such as the MCP SDK.

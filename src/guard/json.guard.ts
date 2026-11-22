@@ -1,6 +1,6 @@
 import { createGuard } from "./@/base.guard";
 import { sendError } from "@/http/res";
-import type { SchemaBuilder } from "./json/schema.json";
+import type { AnySchema } from "@/schema";
 
 const ALLOWED_METHODS = ["POST", "PUT", "PATCH"];
 
@@ -13,7 +13,7 @@ export const DEFAULT_MAX_SIZE = 1 * 1024 * 1024; // Default 1 MB limit
  * @param schema - Schema used to validate the parsed JSON object.
  * @returns A guard factory that accepts a schema and optional error config.
  */
-export const json = createGuard<SchemaBuilder<any>>(
+export const json = createGuard<AnySchema>(
   async (ctx, next, schema, errorConfig) => {
     if (!ALLOWED_METHODS.includes(ctx.req.method.toUpperCase())) {
       return await next();
@@ -105,17 +105,19 @@ export const json = createGuard<SchemaBuilder<any>>(
       });
     }
 
-    // 5. Pass parsed object to your SchemaBuilder instance
-    const { errors, processedData } = schema.validate(body);
+    // 5. Validate the parsed object against the supplied schema
+    const result = schema.safeParse(body);
 
-    if (errors.length > 0) {
+    if (!result.success) {
       return sendError({
         ...errorConfig,
-        message: `Validation failed: ${errors.join(", ")}`,
+        message: `Validation failed: ${result.error.issues
+          .map((issue) => issue.message)
+          .join(", ")}`,
       });
     }
 
-    ctx.req["_json"] = processedData;
+    ctx.req["_json"] = result.data;
 
     return await next();
   },

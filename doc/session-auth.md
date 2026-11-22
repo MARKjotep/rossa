@@ -42,7 +42,7 @@ objects; the service implements database reads and writes.
 import { SQL } from "bun";
 import {
   DbRepository,
-  Schema,
+  DbSchema,
   SessionAuthInterface,
   sqliteDialect,
   t,
@@ -65,7 +65,7 @@ export class AppSessionAuthService extends SessionAuthInterface {
     secret: string,
   ) {
     super(config, secret);
-    const schema = new Schema<SessionRow>(
+    const schema = new DbSchema<SessionRow>(
       "sessions",
       {
         id: t.text().primary,

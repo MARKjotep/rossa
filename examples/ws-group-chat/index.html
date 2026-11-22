@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rossa group chat</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0f1115; color: #e5e7eb; font: 15px/1.5 system-ui, sans-serif; }
+      main { max-width: 940px; margin: 0 auto; padding: 24px 16px 40px; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+      h1 { margin: 0; font-size: 20px; }
+      h2 { margin: 0 0 10px; font-size: 13px; color: #cbd5e1; text-transform: uppercase; letter-spacing: .06em; }
+      .status { color: #9ca3af; font-size: 13px; }
+      .status.bad { color: #f87171; }
+      .card { background: #171a21; border: 1px solid #272c36; border-radius: 10px; padding: 14px; }
+      .room { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; }
+      .chat { display: flex; flex-direction: column; height: 62vh; min-height: 420px; }
+      #messages { flex: 1; overflow-y: auto; list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+      .msg { max-width: 85%; padding: 8px 10px; border-radius: 8px; background: #202631; overflow-wrap: anywhere; }
+      .msg.mine { align-self: flex-end; background: #1d3a5f; }
+      .msg .from { display: block; font-size: 12px; font-weight: 700; color: #93c5fd; margin-bottom: 2px; }
+      .msg.mine .from { color: #bfdbfe; text-align: right; }
+      .system { color: #9ca3af; font-size: 13px; font-style: italic; }
+      #users { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+      #users li { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+      .user { width: 100%; text-align: left; background: #0f1115; color: inherit; border: 1px solid #333a48; border-radius: 8px; padding: 7px 9px; font: inherit; font-weight: 400; cursor: pointer; display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+      .user.selected { border-color: #3b82f6; background: #172554; }
+      .self-name { display: flex; align-items: center; gap: 6px; padding: 7px 0; }
+      .you { color: #9ca3af; font-size: 12px; }
+      .badge { margin-left: auto; background: #3f2d12; color: #fbbf24; border: 1px solid #7c5a16; border-radius: 999px; padding: 1px 7px; font-size: 11px; }
+      .dm-panel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 10px; }
+      .dm-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .dm-head h2 { margin: 0; }
+      #dm-messages { max-height: 220px; overflow-y: auto; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+      .close { background: #272c36; padding: 5px 10px; font-size: 12px; }
+      form { display: flex; gap: 8px; }
+      input { flex: 1; min-width: 0; border: 1px solid #333a48; background: #0f1115; color: inherit; border-radius: 8px; padding: 9px 11px; font: inherit; }
+      input:focus { outline: 2px solid #2563eb; outline-offset: 1px; }
+      button { border: 0; border-radius: 8px; background: #2563eb; color: #fff; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      .hint { margin: 10px 0 0; color: #9ca3af; font-size: 12px; }
+      .error { min-height: 1.5em; margin: 14px 0 0; color: #fca5a5; }
+      .hidden { display: none !important; }
+      @media (max-width: 640px) { .room { grid-template-columns: 1fr; } .chat { height: auto; min-height: 360px; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Rossa group chat</h1>
+        <span id="status" class="status">connecting…</span>
+      </header>
+
+      <section id="gate" class="card">
+        <h2>Join the lobby</h2>
+        <form id="join-form">
+          <input id="nickname" maxlength="24" placeholder="Nickname" autocomplete="off" required />
+          <button id="join-btn" type="submit" disabled>Join</button>
+        </form>
+        <p class="hint">Up to 5 people. The first to join becomes the admin.</p>
+      </section>
+
+      <section id="room" class="room hidden">
+        <aside class="card">
+          <h2>Online (<span id="online-count">0</span>)</h2>
+          <ul id="users"></ul>
+        </aside>
+        <div class="card chat">
+          <ul id="messages" aria-live="polite"></ul>
+          <form id="send-form">
+            <input id="body" maxlength="1000" placeholder="Message the lobby…" autocomplete="off" required />
+            <button id="send-btn" type="submit" disabled>Send</button>
+          </form>
+        </div>
+        <section id="dm-panel" class="card dm-panel hidden">
+          <div class="dm-head">
+            <h2>DM with <span id="dm-peer"></span></h2>
+            <button id="dm-close" class="close" type="button">Close</button>
+          </div>
+          <ul id="dm-messages" aria-live="polite"></ul>
+          <form id="dm-form">
+            <input id="dm-body" maxlength="1000" placeholder="Direct message…" autocomplete="off" required />
+            <button id="dm-send" type="submit" disabled>Send</button>
+          </form>
+        </section>
+      </section>
+
+      <p id="error" class="error" role="alert"></p>
+    </main>
+
+    <script>
+      (() => {
+        const ERRORS = {
+          invalid_nickname: "Nickname must be 1–24 characters.",
+          nickname_taken: "That nickname is already online.",
+          room_full: "The lobby is full (5 people max).",
+          invalid_message: "Message cannot be empty.",
+          message_too_long: "Message is too long (1000 characters max).",
+          invalid_recipient: "Pick an online user.",
+          self_dm: "You cannot message yourself.",
+          user_offline: "That user is no longer online.",
+          join_required: "Join the lobby first.",
+          already_joined: "This connection already joined.",
+          unknown_type: "Unknown command.",
+          persistence_failed: "The server could not save or load messages.",
+          disconnected: "Disconnected from the server. Reload to reconnect.",
+          transport_error: "WebSocket error.",
+        };
+
+        const els = {
+          status: document.querySelector("#status"),
+          gate: document.querySelector("#gate"),
+          room: document.querySelector("#room"),
+          nickname: document.querySelector("#nickname"),
+          joinForm: document.querySelector("#join-form"),
+          joinBtn: document.querySelector("#join-btn"),
+          users: document.querySelector("#users"),
+          onlineCount: document.querySelector("#online-count"),
+          messages: document.querySelector("#messages"),
+          body: document.querySelector("#body"),
+          sendForm: document.querySelector("#send-form"),
+          sendBtn: document.querySelector("#send-btn"),
+          dmPanel: document.querySelector("#dm-panel"),
+          dmPeer: document.querySelector("#dm-peer"),
+          dmMessages: document.querySelector("#dm-messages"),
+          dmBody: document.querySelector("#dm-body"),
+          dmForm: document.querySelector("#dm-form"),
+          dmSend: document.querySelector("#dm-send"),
+          dmClose: document.querySelector("#dm-close"),
+          error: document.querySelector("#error"),
+        };
+
+        const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host || "localhost:8787"}/ws`;
+        let socket = null;
+        let joined = false;
+        let me = "";
+        let admin = null;
+        let online = [];
+        let presenceSeen = false;
+        let dmPeer = null;
+        let dmPending = null;
+        const renderedIds = new Set();
+        const dmThreads = new Map();
+
+        const setStatus = (text, bad = false) => {
+          els.status.textContent = text;
+          els.status.classList.toggle("bad", bad);
+        };
+        const showError = (code) => {
+          els.error.textContent = ERRORS[code] ?? `Server error: ${code}`;
+        };
+        const clearError = () => { els.error.textContent = ""; };
+
+        function send(command) {
+          if (!socket || socket.readyState !== WebSocket.OPEN) {
+            showError("disconnected");
+            return false;
+          }
+          socket.send(JSON.stringify(command));
+          return true;
+        }
+
+        function scrollDown() {
+          els.messages.scrollTop = els.messages.scrollHeight;
+        }
+
+        function addSystem(text) {
+          const li = document.createElement("li");
+          li.className = "system";
+          li.textContent = text;
+          els.messages.append(li);
+          scrollDown();
+        }
+
+        function messageNode(from, body, mine) {
+          const li = document.createElement("li");
+          li.className = mine ? "msg mine" : "msg";
+          const label = document.createElement("span");
+          label.className = "from";
+          label.textContent = `${mine ? "You" : from}${from === admin ? " 👑" : ""}`;
+          const text = document.createElement("span");
+          text.textContent = body;
+          li.append(label, text);
+          return li;
+        }
+
+        function addMessage(from, body, id, mine) {
+          if (id !== undefined && id !== null) {
+            const key = String(id);
+            if (renderedIds.has(key)) return;
+            renderedIds.add(key);
+          }
+          els.messages.append(messageNode(from, body, mine));
+          scrollDown();
+        }
+
+        function addHistory(messages) {
+          const fragment = document.createDocumentFragment();
+          for (const message of messages) {
+            if (!message || typeof message.from !== "string" || typeof message.body !== "string") continue;
+            if (message.id !== undefined && message.id !== null) {
+              const key = String(message.id);
+              if (renderedIds.has(key)) continue;
+              renderedIds.add(key);
+            }
+            fragment.append(messageNode(message.from, message.body, message.from === me));
+          }
+          // `messages` is oldest-first, and prepending keeps that order.
+          els.messages.prepend(fragment);
+          scrollDown();
+        }
+
+        function dmNode(direction, body) {
+          const li = document.createElement("li");
+          li.className = direction === "to" ? "msg mine" : "msg";
+          const label = document.createElement("span");
+          label.className = "from";
+          label.textContent = direction === "to" ? "You" : `from: ${dmPeer}`;
+          const text = document.createElement("span");
+          text.textContent = body;
+          li.append(label, text);
+          return li;
+        }
+
+        function scrollDmDown() {
+          els.dmMessages.scrollTop = els.dmMessages.scrollHeight;
+        }
+
+        function renderDmThread() {
+          els.dmMessages.replaceChildren();
+          const thread = dmThreads.get(dmPeer) ?? [];
+          if (!thread.length) {
+            const li = document.createElement("li");
+            li.className = "system";
+            li.textContent = `No direct messages with ${dmPeer} yet.`;
+            els.dmMessages.append(li);
+            return;
+          }
+          for (const item of thread) {
+            els.dmMessages.append(dmNode(item.from === me ? "to" : "from", item.body));
+          }
+          scrollDmDown();
+        }
+
+        function openDm(peer) {
+          dmPeer = peer;
+          els.dmPeer.textContent = peer;
+          els.dmPanel.classList.remove("hidden");
+          els.dmSend.disabled = dmPending !== null;
+          renderDmThread();
+          renderUsers();
+          els.dmBody.focus();
+        }
+
+        function closeDm() {
+          dmPeer = null;
+          els.dmPanel.classList.add("hidden");
+          renderUsers();
+        }
+
+        function receiveDm(peer, body) {
+          const thread = dmThreads.get(peer) ?? [];
+          thread.push({ from: peer, body });
+          dmThreads.set(peer, thread);
+          // Keep it simple: switch to the sender's panel so the message is
+          // visible even if another conversation was open.
+          if (dmPeer !== peer) openDm(peer);
+          else {
+            els.dmMessages.append(dmNode("from", body));
+            scrollDmDown();
+          }
+        }
+
+        function renderUsers() {
+          els.users.replaceChildren();
+          els.onlineCount.textContent = String(online.length);
+          for (const name of online) {
+            const li = document.createElement("li");
+            const isMe = name === me;
+            const control = document.createElement(isMe ? "span" : "button");
+            control.className = isMe ? "self-name" : "user";
+            if (!isMe) {
+              control.type = "button";
+              if (name === dmPeer) control.classList.add("selected");
+              control.addEventListener("click", () => openDm(name));
+            }
+            const label = document.createElement("span");
+            label.textContent = name;
+            control.append(label);
+            if (isMe) {
+              const you = document.createElement("span");
+              you.className = "you";
+              you.textContent = "(you)";
+              control.append(you);
+            }
+            if (name === admin) {
+              const badge = document.createElement("span");
+              badge.className = "badge";
+              badge.textContent = "admin";
+              control.append(badge);
+            }
+            li.append(control);
+            els.users.append(li);
+          }
+        }
+
+        function applyPresence(nextOnline, nextAdmin) {
+          const next = new Set(nextOnline);
+          if (!presenceSeen) {
+            addSystem(`You joined as ${me}.`);
+            presenceSeen = true;
+          } else {
+            const previous = new Set(online);
+            for (const name of nextOnline) {
+              if (!previous.has(name) && name !== me) addSystem(`${name} joined.`);
+            }
+            for (const name of online) {
+              if (!next.has(name)) addSystem(`${name} left.`);
+            }
+            if (nextAdmin !== admin) {
+              addSystem(nextAdmin ? `${nextAdmin} is now the admin.` : "The lobby is empty.");
+            }
+          }
+          online = nextOnline;
+          admin = nextAdmin;
+          if (dmPeer && !next.has(dmPeer)) {
+            addSystem(`${dmPeer} went offline.`);
+            dmPeer = null;
+            els.dmPanel.classList.add("hidden");
+          }
+          renderUsers();
+        }
+
+        function handle(data) {
+          if (!data || typeof data !== "object") return;
+          switch (data.type) {
+            case "joined":
+              joined = true;
+              if (typeof data.nickname === "string") me = data.nickname;
+              els.gate.classList.add("hidden");
+              els.room.classList.remove("hidden");
+              els.joinBtn.disabled = true;
+              els.sendBtn.disabled = false;
+              setStatus(data.admin === true ? "connected · admin" : "connected");
+              clearError();
+              break;
+            case "presence":
+              applyPresence(
+                Array.isArray(data.online) ? data.online.filter((n) => typeof n === "string") : [],
+                typeof data.admin === "string" ? data.admin : null,
+              );
+              break;
+            case "message":
+              if (typeof data.from === "string" && typeof data.body === "string") {
+                addMessage(data.from, data.body, data.id, data.from === me);
+              }
+              break;
+            case "history":
+              if (Array.isArray(data.messages)) addHistory(data.messages);
+              break;
+            case "sent":
+              // Own messages arrive as a `message` frame; nothing to render here.
+              break;
+            case "dm":
+              if (typeof data.from === "string" && typeof data.body === "string") {
+                receiveDm(data.from, data.body);
+              }
+              break;
+            case "dm_sent":
+              els.dmSend.disabled = false;
+              if (dmPending) {
+                const thread = dmThreads.get(dmPending.to) ?? [];
+                thread.push({ from: me, body: dmPending.body });
+                dmThreads.set(dmPending.to, thread);
+                if (dmPeer === dmPending.to) {
+                  els.dmMessages.append(dmNode("to", dmPending.body));
+                  scrollDmDown();
+                }
+                dmPending = null;
+              }
+              break;
+            case "error":
+              dmPending = null;
+              els.dmSend.disabled = false;
+              showError(typeof data.code === "string" ? data.code : "unknown_error");
+              if (!joined) els.joinBtn.disabled = false;
+              break;
+          }
+        }
+
+        function connect() {
+          setStatus("connecting…");
+          socket = new WebSocket(wsUrl);
+          socket.addEventListener("open", () => {
+            setStatus("connected");
+            els.joinBtn.disabled = false;
+          });
+          socket.addEventListener("close", () => {
+            joined = false;
+            dmPending = null;
+            setStatus("disconnected", true);
+            els.joinBtn.disabled = true;
+            els.sendBtn.disabled = true;
+            els.dmSend.disabled = true;
+            showError("disconnected");
+          });
+          socket.addEventListener("error", () => showError("transport_error"));
+          socket.addEventListener("message", (event) => {
+            let data;
+            try {
+              data = JSON.parse(String(event.data));
+            } catch {
+              return;
+            }
+            handle(data);
+          });
+        }
+
+        els.joinForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          clearError();
+          const nickname = els.nickname.value.trim();
+          if (!nickname) {
+            showError("invalid_nickname");
+            return;
+          }
+          if (send({ type: "join", nickname })) els.joinBtn.disabled = true;
+        });
+
+        els.sendForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          clearError();
+          const body = els.body.value;
+          if (!body.trim()) {
+            showError("invalid_message");
+            return;
+          }
+          if (send({ type: "send", body })) els.body.value = "";
+        });
+
+        els.dmForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          clearError();
+          if (dmPending) return;
+          if (!dmPeer) {
+            showError("invalid_recipient");
+            return;
+          }
+          const body = els.dmBody.value;
+          if (!body.trim()) {
+            showError("invalid_message");
+            return;
+          }
+          if (!send({ type: "dm", to: dmPeer, body })) return;
+          dmPending = { to: dmPeer, body };
+          els.dmBody.value = "";
+          els.dmSend.disabled = true;
+        });
+
+        els.dmClose.addEventListener("click", closeDm);
+
+        connect();
+      })();
+    </script>
+  </body>
+</html>

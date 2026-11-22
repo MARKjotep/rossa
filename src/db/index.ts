@@ -6,7 +6,7 @@ export {
 } from "./errors";
 export { DbInspector } from "./inspector";
 export { DbRepository, type Where } from "./repository";
-export { Schema } from "./schema";
+export { DbSchema } from "./schema";
 export { getDialect } from "./dialects/registry";
 export { postgresDialect } from "./dialects/postgres";
 export { sqliteDialect } from "./dialects/sqlite";
