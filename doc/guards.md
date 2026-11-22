@@ -229,7 +229,7 @@ instances.
 | `loggerFN(formatter)` | Custom logging | Calls the formatter after downstream work with `{ ctx, res, timestamp, method, url }`, then logs a truthy return value. |
 | `timeout(milliseconds)` | Downstream timeout | Stops waiting after the limit and returns 408 by default. It cannot cancel work already running downstream. |
 | `smartCache({ ttlMs })` | In-memory GET cache | Caches cacheable `200` GET responses by full URL, including the query string. Requests with `Authorization`, `Cookie`, or `Range` headers bypass it, as do `no-cache`/`no-store` requests. Responses with `Set-Cookie`, `Content-Range`, `Vary`, private/no-store/no-cache directives, or zero max-age are not stored. The store is per-process, capped at 1,000 entries, and sweeps expired entries; use it only for public responses. |
-| `staticFiles()` | Static files | Sends GET and HEAD requests for recognized file paths to the configured static file server. Register globally before route handling. |
+| `staticFiles(options?)` | Static files | Sends GET and HEAD requests for recognized file paths to a static file server. Without options it is a global mount; use `prefix` and `root` to scope a mount. |
 | `errorHandler(options?)` | Error boundary | Catches thrown errors from downstream guards and handlers; returns a generic 500 response unless `onError` is supplied. Place it before the work it should catch. |
 
 ```ts
@@ -242,6 +242,45 @@ app.use(errorHandler({ logErrors: true }));
 Because `app.use` prepends guards, the last registration runs first. In this
 example the error guard wraps static serving and route handling.
 The core server also has a final error handler for uncaught pipeline errors.
+
+### Static file mounts
+
+`staticFiles(options?)` accepts:
+
+| Option | Type | Behavior |
+| --- | --- | --- |
+| `prefix` | `string` | Intercepts only paths under this prefix. The decoded pathname is compared at a path-segment boundary, so `/assets` matches `/assets` and `/assets/app.js` but not `/assetsfoo.png`. Non-matching paths call `next()`, so later guards and routes still run. Omit it to intercept every file-like path. |
+| `root` | `string` | Serves this mount from its own directory instead of the app-wide `clientPath`. Relative paths resolve against `process.cwd()`; absolute paths are used as-is. With a `prefix`, the prefix is stripped before the lookup, so `/files/logo.png` maps to `<root>/logo.png`. Without a prefix the full request path is used. |
+| `extensions` | `string[]` | Additional extensions recognized by this mount, with or without a leading dot. They add to the built-in list, and the app-wide `fileExtensions` setting still applies. |
+
+Only `GET` and `HEAD` requests are intercepted, and HEAD responses keep the
+file headers with an empty body. `prefix` and `root` compose freely, and scoped
+mounts keep the full traversal defenses: encoded traversal and symlink escapes
+return 403. A bare prefix such as `/files` is not a file-like path, so a
+request for it falls through to routes.
+
+A mount without `prefix` intercepts **every** file-like path before route
+guards run. Protected files therefore cannot be gated by route guards, and a
+route whose path ends in a recognized extension (for example
+`/reports/daily.pdf`) is answered by the file server instead of the route. Give
+each mount an explicit prefix when it is meant to be scoped.
+
+```ts
+import { staticFiles } from "rossa";
+
+// Public assets: a scoped mount that runs before authentication.
+app.use(staticFiles({ prefix: "/assets" }));
+
+// Private files: served from their own root, only after authentication.
+app.use(staticFiles({ prefix: "/files", root: "./private-files" }));
+app.use(authGuard);
+```
+
+Because `app.use` prepends, `authGuard` (registered last) runs first, so a
+denied request never reaches the `/files` mount. Guard order is the ordering
+mechanism: register the authentication guard after the mount it protects. A
+global `staticFiles()` with no prefix would run before that guard and serve the
+file anyway.
 
 ## Schema helper
 

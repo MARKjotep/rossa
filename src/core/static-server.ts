@@ -95,12 +95,27 @@ export class StaticFileServer {
     return isFile(path, this.additionalExtensions);
   }
 
-  public async serve(req: Req, res: Res): Promise<Response> {
+  /**
+   * Serves the request from this server's root.
+   *
+   * @param lookupPath - Optional already-decoded path to resolve instead of the
+   * request pathname. Scoped mounts use it to serve a prefix-stripped path;
+   * when omitted the request URL is decoded exactly as before.
+   */
+  public async serve(
+    req: Req,
+    res: Res,
+    lookupPath?: string,
+  ): Promise<Response> {
     let pathname: string;
-    try {
-      pathname = decodeURIComponent(req.url.pathname);
-    } catch {
-      return res.error(400, "Bad Request");
+    if (lookupPath === undefined) {
+      try {
+        pathname = decodeURIComponent(req.url.pathname);
+      } catch {
+        return res.error(400, "Bad Request");
+      }
+    } else {
+      pathname = lookupPath;
     }
     if (pathname.includes("\0")) return res.error(400, "Bad Request");
 

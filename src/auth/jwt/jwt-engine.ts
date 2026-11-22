@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "crypto";
 
 // Export the singleton for your app
 // export const jwtEngine = new JwtEngine(
@@ -8,6 +8,12 @@ import { createHmac, timingSafeEqual } from "crypto";
 export type JwtPayload<T> = T & {
   iat: number;
   exp: number;
+  /**
+   * Unique token identifier assigned on every signature.
+   *
+   * Optional only so tokens issued before this claim existed remain readable.
+   */
+  jti?: string;
 };
 
 export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
@@ -22,6 +28,10 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
 
   /**
    * Generates a signed JWT Access Token.
+   *
+   * A fresh `jti` is always assigned, so signing the same claims twice within
+   * the same clock second still produces two distinct tokens. Any caller
+   * supplied `jti`, `iat`, or `exp` is replaced rather than reused.
    */
   public sign(payload: T, expiresInMinutes: number = 15): string {
     if (!Number.isFinite(expiresInMinutes) || expiresInMinutes <= 0) {
@@ -37,6 +47,9 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
       ...payload,
       iat: now,
       exp: now + expiresInMinutes * 60,
+      // Assigned after the spread: when rotation re-issues consumed refresh
+      // claims, the previous `jti` must never carry over.
+      jti: randomUUID(),
     };
 
     const encodedHeader = Buffer.from(JSON.stringify(header)).toString(
@@ -120,6 +133,9 @@ export class JwtEngine<T extends Record<string, any> = Record<string, any>> {
 
   /**
    * Issues a long-lived refresh token.
+   *
+   * Each call produces a distinct token because `sign` assigns a fresh `jti`,
+   * which is what makes rotation + single-use stores replay-safe.
    */
   public issue(data: T, daysValid: number = 7): string {
     const minutesValid = daysValid * 24 * 60;

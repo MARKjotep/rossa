@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rossa · guard layers playground</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101114;
+        --panel: #17191e;
+        --line: #2a2d35;
+        --text: #e6e8ee;
+        --muted: #9aa0ac;
+        --accent: #9bb0ff;
+        --bad: #ff8f8f;
+        --good: #8fdfb0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      header {
+        padding: 28px clamp(16px, 4vw, 48px) 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        letter-spacing: 0.2px;
+      }
+      header p {
+        margin: 6px 0 18px;
+        color: var(--muted);
+        max-width: 92ch;
+      }
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+        gap: 14px;
+        padding: 18px clamp(16px, 4vw, 48px) 48px;
+      }
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .card h2 {
+        margin: 0;
+        font-size: 15px;
+        color: var(--accent);
+      }
+      .card h3 {
+        margin: 2px 0 0;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .desc {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .layers {
+        margin: 0;
+        color: var(--good);
+        font:
+          11px/1.5 ui-monospace,
+          monospace;
+        word-break: break-word;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .fields {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .fields label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font:
+          11px ui-monospace,
+          monospace;
+        color: var(--muted);
+      }
+      input,
+      select {
+        background: #0c0d10;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font:
+          12px ui-monospace,
+          monospace;
+      }
+      input {
+        width: 150px;
+      }
+      input[type="file"] {
+        width: 100%;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        background: #232838;
+        color: var(--text);
+        border: 1px solid #39425c;
+        border-radius: 6px;
+        padding: 6px 11px;
+        font:
+          12px ui-sans-serif,
+          system-ui,
+          sans-serif;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .out {
+        margin: 0;
+        min-height: 64px;
+        max-height: 300px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #0c0d10;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px;
+        font:
+          11.5px/1.45 ui-monospace,
+          monospace;
+        color: #c8ccd6;
+      }
+      .out.waiting {
+        color: var(--accent);
+      }
+      .out.error {
+        color: var(--bad);
+      }
+      code {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>rossa · guard layers playground</h1>
+      <p>
+        Five realistic request paths where guards stack. Each card drives the
+        live server; buttons cover the happy path and every denying layer. The
+        page logs in, keeps JWTs, and reuses the session cookie for you. The
+        in-memory stores reset when the server restarts.
+      </p>
+    </header>
+    <main id="grid"></main>
+    <script>
+      const state = {
+        adminToken: null,
+        memberToken: null,
+        csrfToken: null,
+        account: null,
+      };
+
+      async function request(method, path, opts = {}) {
+        const started = performance.now();
+        const res = await fetch(path, {
+          method,
+          headers: opts.headers ?? {},
+          body: opts.body,
+          credentials: opts.credentials ?? "same-origin",
+        });
+        return {
+          method,
+          path,
+          status: res.status,
+          ms: Math.round(performance.now() - started),
+          headers: Object.fromEntries(res.headers.entries()),
+          body: await res.text(),
+        };
+      }
+
+      const jsonPost = (path, value, headers = {}, opts = {}) =>
+        request("POST", path, {
+          ...opts,
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify(value),
+        });
+      const get = (path, headers) =>
+        request("GET", path, headers ? { headers } : {});
+      const bearer = (token) =>
+        token ? { authorization: `Bearer ${token}` } : {};
+
+      function pretty(body) {
+        try {
+          return JSON.stringify(JSON.parse(body), null, 2);
+        } catch {
+          return body;
+        }
+      }
+      function format(results) {
+        const list = (Array.isArray(results) ? results : [results]).filter(
+          Boolean,
+        );
+        const shown = [
+          "retry-after",
+          "x-ratelimit-limit",
+          "x-ratelimit-remaining",
+          "x-ratelimit-tier",
+          "content-type",
+        ];
+        return list
+          .map((r) => {
+            const head = `${r.method ?? "?"} ${r.path ?? ""} → ${r.status}${r.ms == null ? "" : ` (${r.ms}ms)`}`;
+            const headers = shown
+              .filter((key) => r.headers?.[key])
+              .map((key) => `${key}: ${r.headers[key]}`)
+              .join("\n");
+            return `${head}${headers ? `\n${headers}` : ""}\n${pretty(r.body)}`;
+          })
+          .join("\n\n");
+      }
+      const note = (text) => ({
+        method: "—",
+        path: "local",
+        status: "n/a",
+        body: text,
+      });
+
+      async function adminLogin(role) {
+        const creds =
+          role === "admin"
+            ? { email: "admin@example.com", password: "admin-demo" }
+            : { email: "member@example.com", password: "member-demo" };
+        const result = await jsonPost("/admin/login", creds);
+        if (result.status === 200) {
+          const data = JSON.parse(result.body);
+          if (role === "admin") state.adminToken = data.accessToken;
+          else state.memberToken = data.accessToken;
+        }
+        return result;
+      }
+      const ensureAdmin = async () =>
+        state.adminToken ? null : adminLogin("admin");
+      const ensureMember = async () =>
+        state.memberToken ? null : adminLogin("member");
+
+      async function accountLogin() {
+        const emailInput = document.querySelector('[data-field="login-email"]');
+        const passwordInput = document.querySelector(
+          '[data-field="login-password"]',
+        );
+        const result = await jsonPost("/api/account/login", {
+          email: emailInput?.value?.trim() ?? "ada@example.com",
+          password: passwordInput?.value ?? "correct-horse",
+        });
+        if (result.status === 200) {
+          const data = JSON.parse(result.body);
+          state.csrfToken = data.csrfToken;
+          state.account = data.user;
+        } else {
+          state.csrfToken = null;
+        }
+        return result;
+      }
+      const ensureAccount = async () =>
+        state.csrfToken ? null : accountLogin();
+
+      function makeCard(title, desc, layerOrder, hint) {
+        const card = document.createElement("article");
+        card.className = "card";
+        card.innerHTML = `<h2></h2><p class="desc"></p><p class="layers"></p><div class="fields"></div><div class="actions"></div><pre class="out">ready</pre>`;
+        card.querySelector("h2").textContent = title;
+        card.querySelector(".desc").textContent = desc;
+        card.querySelector(".layers").textContent = layerOrder;
+        if (hint) {
+          const node = document.createElement("div");
+          node.className = "hint";
+          node.textContent = hint;
+          card.querySelector(".fields").after(node);
+        }
+        const out = card.querySelector(".out");
+        const actions = card.querySelector(".actions");
+        const fields = card.querySelector(".fields");
+
+        function addButton(label, run) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", async () => {
+            out.className = "out waiting";
+            out.textContent = "waiting…";
+            try {
+              out.textContent = format(await run());
+              out.className = "out";
+            } catch (error) {
+              out.className = "out error";
+              out.textContent = `network error: ${error.message}`;
+            }
+          });
+          actions.append(button);
+          return button;
+        }
+
+        function addInput(name, label, value) {
+          const wrap = document.createElement("label");
+          wrap.textContent = label;
+          const input = document.createElement("input");
+          input.value = value;
+          input.dataset.field = name;
+          wrap.append(input);
+          fields.append(wrap);
+          return input;
+        }
+
+        function addFile() {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.dataset.field = "avatar-file";
+          fields.append(input);
+          return input;
+        }
+
+        function addSelect(name, label, options) {
+          const wrap = document.createElement("label");
+          wrap.textContent = label;
+          const select = document.createElement("select");
+          for (const value of options) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value;
+            select.append(option);
+          }
+          select.dataset.field = name;
+          wrap.append(select);
+          fields.append(wrap);
+          return select;
+        }
+
+        return { card, out, fields, addButton, addInput, addFile, addSelect };
+      }
+
+      /* ------------------------------ Scenario 1 ------------------------------ */
+      {
+        const ui = makeCard(
+          "1 · Admin panel",
+          "JWT identity, then a role gate, then the office network policy, then an audit record.",
+          "jwtAuth → requireRole(admin) → ipFilter → auditLog",
+          "member@example.com / member-demo and admin@example.com / admin-demo are seeded.",
+        );
+        const panel = (token) => get("/admin/panel", bearer(token));
+        ui.addButton("Login admin", () => adminLogin("admin"));
+        ui.addButton("Login member", () => adminLogin("member"));
+        ui.addButton("Run as admin", async () => [
+          await ensureAdmin(),
+          await panel(state.adminToken),
+        ]);
+        ui.addButton("Fail: member role", async () => [
+          await ensureMember(),
+          await panel(state.memberToken),
+        ]);
+        ui.addButton("Fail: no token", () => panel(null));
+        ui.addButton("Fail: bad token", () => panel("not-a-jwt"));
+        ui.addButton("Fail: disallowed IP", async () => {
+          const login = await ensureAdmin();
+          const deny = await jsonPost(
+            "/demo/ip-policy",
+            { target: "admin", allowLoopback: false },
+            bearer(state.adminToken),
+          );
+          const blocked = await panel(state.adminToken);
+          const allow = await jsonPost(
+            "/demo/ip-policy",
+            { target: "admin", allowLoopback: true },
+            bearer(state.adminToken),
+          );
+          return [login, deny, blocked, allow];
+        });
+        ui.addButton("Panel + audit trail", async () => {
+          const login = await ensureAdmin();
+          return [
+            login,
+            await panel(state.adminToken),
+            await get("/admin/audit", bearer(state.adminToken)),
+          ];
+        });
+        document.getElementById("grid").append(ui.card);
+      }
+
+      /* ------------------------------ Scenario 2 ------------------------------ */
+      {
+        const ui = makeCard(
+          "2 · Account settings",
+          "Session cookie, CSRF proof for the state-changing write, schema validation, then a small write budget.",
+          "session → requireSession → csrf → json(z.object) → rateLimit",
+          "The login button sets both the HttpOnly session cookie and a readable csrf_token cookie.",
+        );
+        ui.addInput("login-email", "email", "ada@example.com");
+        ui.addInput("login-password", "password", "correct-horse");
+        ui.addInput("settings-email", "new email", "ada@example.com");
+        ui.addInput("settings-name", "display name", "Ada Lovelace");
+
+        const body = () => ({
+          email: document
+            .querySelector('[data-field="settings-email"]')
+            .value.trim(),
+          displayName: document
+            .querySelector('[data-field="settings-name"]')
+            .value.trim(),
+        });
+        const settings = (headers = {}) =>
+          jsonPost("/api/account/settings", body(), {
+            ...headers,
+            ...(state.csrfToken ? { "x-csrf-token": state.csrfToken } : {}),
+          });
+
+        ui.addButton("Login", () => accountLogin());
+        ui.addButton("Update settings", async () => [
+          await ensureAccount(),
+          await settings(),
+        ]);
+        ui.addButton("Fail: no session", () =>
+          jsonPost(
+            "/api/account/settings",
+            body(),
+            {},
+            { credentials: "omit" },
+          ),
+        );
+        ui.addButton("Fail: CSRF mismatch", async () => [
+          await ensureAccount(),
+          await jsonPost("/api/account/settings", body(), {
+            "x-csrf-token": "wrong",
+          }),
+        ]);
+        ui.addButton("Fail: schema", async () => [
+          await ensureAccount(),
+          await jsonPost(
+            "/api/account/settings",
+            { email: "not-an-email", displayName: "x" },
+            { "x-csrf-token": state.csrfToken },
+          ),
+        ]);
+        ui.addButton("Burst 6× valid", async () => {
+          const login = await ensureAccount();
+          const results = [login];
+          for (let i = 0; i < 6; i += 1) results.push(await settings());
+          return results;
+        });
+        document.getElementById("grid").append(ui.card);
+      }
+
+      /* ------------------------------ Scenario 3 ------------------------------ */
+      {
+        const ui = makeCard(
+          "3 · Partner API",
+          "An API key resolves the partner tier, the tier's quota applies, and the handler is bounded by a timeout.",
+          "apiKey → per-tier quota (gold 10/10s, silver 3/10s) → timeout(200)",
+          "Keys: partner-gold-key and partner-silver-key. `?slow=1` makes the handler lose the 200ms race.",
+        );
+        const select = ui.addSelect("partner-key", "key", [
+          "partner-gold-key",
+          "partner-silver-key",
+        ]);
+        const partner = (key, query = "") =>
+          get(`/partner/v1/data${query}`, { "x-api-key": key });
+        const selected = () => select.value;
+
+        ui.addButton("Run selected key", () => partner(selected()));
+        ui.addButton("Fail: unknown key", () => partner("nope-not-a-key"));
+        ui.addButton("Fail: missing key", () => get("/partner/v1/data"));
+        ui.addButton("Burst silver 4×", async () => {
+          const results = [];
+          for (let i = 0; i < 4; i += 1)
+            results.push(await partner("partner-silver-key"));
+          return results;
+        });
+        ui.addButton("Fail: timeout (gold, slow)", () =>
+          partner("partner-gold-key", "?slow=1"),
+        );
+        document.getElementById("grid").append(ui.card);
+      }
+
+      /* ------------------------------ Scenario 4 ------------------------------ */
+      {
+        const ui = makeCard(
+          "4 · Avatar upload",
+          "Authenticated multipart upload with a MIME/size allowlist and text-field escaping.",
+          "session → requireSession → contentType → multipart → validateAvatar → sanitize",
+          "The login form in card 2 establishes the session used here. Nothing is written to disk.",
+        );
+        const fileInput = ui.addFile();
+        const png = () =>
+          new File(
+            [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])],
+            "avatar.png",
+            { type: "image/png" },
+          );
+        const form = (file) => {
+          const data = new FormData();
+          if (file) data.set("avatar", file, file.name);
+          data.set("caption", "<script>alert(1)<\/script>");
+          data.set("bio", "<b>hello</b>");
+          return data;
+        };
+        const upload = (data, opts = {}) =>
+          request("POST", "/api/account/avatar", { body: data, ...opts });
+
+        ui.addButton("Upload demo PNG", async () => [
+          await ensureAccount(),
+          await upload(form(png())),
+        ]);
+        ui.addButton("Upload chosen file", async () => {
+          const chosen = fileInput.files?.[0];
+          if (!chosen) return note("Choose a file with the file input first.");
+          return [await ensureAccount(), await upload(form(chosen))];
+        });
+        ui.addButton("Fail: not logged in", () =>
+          upload(form(png()), { credentials: "omit" }),
+        );
+        ui.addButton("Fail: wrong content type", async () => [
+          await ensureAccount(),
+          await jsonPost("/api/account/avatar", { avatar: "x" }),
+        ]);
+        ui.addButton("Fail: malformed multipart", async () => [
+          await ensureAccount(),
+          await request("POST", "/api/account/avatar", {
+            headers: { "content-type": "multipart/form-data; boundary=broken" },
+            body: "this is not a multipart body",
+          }),
+        ]);
+        ui.addButton("Fail: wrong MIME", async () => [
+          await ensureAccount(),
+          await upload(
+            form(
+              new File(["not an image"], "avatar.txt", { type: "text/plain" }),
+            ),
+          ),
+        ]);
+        ui.addButton("Fail: too large", async () => [
+          await ensureAccount(),
+          await upload(
+            form(
+              new File([new Uint8Array(1024 * 1024 + 1)], "big.png", {
+                type: "image/png",
+              }),
+            ),
+          ),
+        ]);
+        ui.addButton("Fail: missing file", async () => [
+          await ensureAccount(),
+          await upload(form(null)),
+        ]);
+        document.getElementById("grid").append(ui.card);
+      }
+
+      /* ------------------------------ Scenario 5 ------------------------------ */
+      {
+        const ui = makeCard(
+          "5 · Payment webhook",
+          "HMAC over the raw body, provider network policy, replay protection, then schema validation.",
+          "hmacSignature → ipFilter → webhookReplay → json(z.object)",
+          "The page intentionally has no client-side HMAC signer. Buttons show the 401 path only; README curl recipes exercise 403/400 with a valid signature. The valid happy path is also covered by the smoke test.",
+        );
+        const payload = () => ({
+          eventId: `evt_${Date.now()}`,
+          amount: 12.5,
+          timestamp: Math.floor(Date.now() / 1000),
+        });
+        ui.addButton("Fail: missing signature", () =>
+          jsonPost("/webhooks/payments", payload()),
+        );
+        ui.addButton("Fail: bad signature", () =>
+          jsonPost("/webhooks/payments", payload(), {
+            "x-signature": "deadbeef",
+          }),
+        );
+        document.getElementById("grid").append(ui.card);
+      }
+    </script>
+  </body>
+</html>

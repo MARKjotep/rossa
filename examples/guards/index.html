@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rossa · guards playground</title>
+    <style>
+      :root { color-scheme: dark; --bg: #101114; --panel: #17191e; --line: #2a2d35; --text: #e6e8ee; --muted: #9aa0ac; --accent: #9bb0ff; --bad: #ff8f8f; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+      header { padding: 28px clamp(16px, 4vw, 48px) 8px; border-bottom: 1px solid var(--line); }
+      h1 { margin: 0; font-size: 22px; letter-spacing: 0.2px; }
+      header p { margin: 6px 0 18px; color: var(--muted); max-width: 78ch; }
+      main { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; padding: 18px clamp(16px, 4vw, 48px) 48px; }
+      .card { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+      .card h2 { margin: 0; font-size: 15px; color: var(--accent); }
+      .desc { margin: 0; color: var(--muted); font-size: 12.5px; }
+      .hint { color: var(--muted); font-size: 11px; }
+      .fields { display: flex; flex-wrap: wrap; gap: 8px; }
+      .fields label { display: flex; align-items: center; gap: 6px; font: 11px ui-monospace, monospace; color: var(--muted); }
+      input, textarea { background: #0c0d10; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 12px ui-monospace, monospace; }
+      input { width: 125px; }
+      input[type="file"] { width: 100%; }
+      textarea { width: 100%; min-height: 56px; resize: vertical; }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      button { background: #232838; color: var(--text); border: 1px solid #39425c; border-radius: 6px; padding: 6px 11px; font: 12px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
+      button:hover { border-color: var(--accent); color: var(--accent); }
+      .out { margin: 0; min-height: 54px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #0c0d10; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 11.5px/1.45 ui-monospace, monospace; color: #c8ccd6; }
+      .out.waiting { color: var(--accent); }
+      .out.error { color: var(--bad); }
+      code { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>rossa · guards playground</h1>
+      <p>
+        Every card calls a live route under <code>/api</code>. Guard failures
+        return their real status and JSON error. The server console logs every
+        request through the global <code>loggerFN</code> guard.
+      </p>
+    </header>
+    <main id="grid"></main>
+    <script>
+      const ctJson = { "content-type": "application/json" };
+      const ctForm = { "content-type": "application/x-www-form-urlencoded" };
+
+      async function request(method, path, opts = {}) {
+        const started = performance.now();
+        const res = await fetch(path, { method, headers: opts.headers, body: opts.body, credentials: "same-origin" });
+        return { method, path, status: res.status, ms: Math.round(performance.now() - started), headers: Object.fromEntries(res.headers.entries()), body: await res.text() };
+      }
+      const post = (path, body, headers = ctJson) => request("POST", path, { headers, body });
+      const get = (path, headers) => request("GET", path, headers ? { headers } : {});
+
+      function pretty(body) {
+        try { return JSON.stringify(JSON.parse(body), null, 2); } catch { return body; }
+      }
+      function format(results) {
+        const shown = ["content-type", "access-control-allow-origin", "access-control-allow-methods", "x-ratelimit-remaining", "retry-after", "x-frame-options"];
+        return (Array.isArray(results) ? results : [results]).map((r) => {
+          const head = `${r.method ?? "?"} ${r.path ?? ""} → ${r.status}${r.ms == null ? "" : ` (${r.ms}ms)`}`;
+          const headers = shown.filter((key) => r.headers?.[key]).map((key) => `${key}: ${r.headers[key]}`).join("\n");
+          return `${head}${headers ? `\n${headers}` : ""}\n${pretty(r.body)}`;
+        }).join("\n\n");
+      }
+
+      const demos = [
+        { title: "JSON body · json + keys", desc: "z.object + z.coerce.number(); missing key is caught by keys().",
+          text: '{"name":"Ada","count":"3"}', buttons: [
+            ["Run valid", (ui) => post("/api/json", ui.text)],
+            ["Missing count", () => post("/api/json", '{"name":"Ada"}')],
+            ["Wrong content-type", (ui) => post("/api/json", ui.text, { "content-type": "text/plain" })],
+          ] },
+        { title: "Query · validateQuery", desc: "?page=2 is a string until z.coerce.number() runs.",
+          inputs: [["page", "page", "2"], ["q", "q", "rossa"]], buttons: [
+            ["Run valid", (ui) => get(`/api/query?page=${encodeURIComponent(ui.get("page"))}&q=${encodeURIComponent(ui.get("q"))}`)],
+            ["Fail page=0", () => get("/api/query?page=0")],
+          ] },
+        { title: "Form · urlencoded + validateForm", desc: "URL-encoded fields are parsed, validated, then age is coerced.",
+          text: "name=Ada&age=36", buttons: [
+            ["Run valid", (ui) => post("/api/form", ui.text, ctForm)],
+            ["Fail short name", () => post("/api/form", "name=A&age=36", ctForm)],
+          ] },
+        { title: "Multipart · contentType + multipart", desc: "Upload a file; fields and file metadata are reflected back.",
+          inputs: [["note", "note", "hello"]], file: true, buttons: [
+            ["Run valid", (ui) => { const data = new FormData(); data.set("note", ui.get("note")); if (ui.file) data.set("file", ui.file, ui.file.name); return request("POST", "/api/upload", { body: data }); }],
+            ["Fail JSON body", () => post("/api/upload", '{"note":"x"}')],
+          ] },
+        { title: "Header · x-api-key", desc: "header({ 'x-api-key': ... }) validates the value with a callback.",
+          inputs: [["key", "x-api-key", "demo-key"]], buttons: [
+            ["Run valid", (ui) => get("/api/secure", { "x-api-key": ui.get("key") })],
+            ["Fail wrong key", () => get("/api/secure", { "x-api-key": "wrong" })],
+          ] },
+        { title: "Bearer · authBearer", desc: "Authorization: Bearer <token> is matched by the guard validator.",
+          inputs: [["auth", "authorization", "Bearer demo-token"]], buttons: [
+            ["Run valid", (ui) => get("/api/bearer", { authorization: ui.get("auth") })],
+            ["Fail wrong token", () => get("/api/bearer", { authorization: "Bearer wrong" })],
+          ] },
+        { title: "API key · apiKey", desc: "The apiKey guard reads x-api-key and reports missing vs invalid.",
+          inputs: [["key", "x-api-key", "demo-key"]], buttons: [
+            ["Run valid", (ui) => get("/api/key", { "x-api-key": ui.get("key") })],
+            ["Fail missing", () => get("/api/key")],
+          ] },
+        { title: "Multi-header · auth", desc: "auth() validates a map of headers, each with its own predicate.",
+          inputs: [["key", "x-api-key", "demo-key"], ["role", "x-role", "admin"]], buttons: [
+            ["Run valid", (ui) => get("/api/auth", { "x-api-key": ui.get("key"), "x-role": ui.get("role") })],
+            ["Fail wrong role", () => get("/api/auth", { "x-api-key": "demo-key", "x-role": "guest" })],
+          ] },
+        { title: "Rate limit · rateLimit", desc: "max 3 per 10s window keyed by IP + method + path.",
+          buttons: [
+            ["Run", () => get("/api/rate")],
+            ["Burst 4×", async () => { const out = []; for (let i = 0; i < 4; i += 1) out.push(await get("/api/rate")); return out; }],
+          ] },
+        { title: "Timeout · timeout(150)", desc: "The guard races the handler; a slow handler loses and returns 408.",
+          buttons: [["Fast handler", () => get("/api/timeout")], ["Slow handler (500ms)", () => get("/api/timeout?slow=1")]] },
+        { title: "Sanitize · sanitize()", desc: "HTML-sensitive characters in parsed JSON become entities.",
+          text: JSON.stringify({ text: "<script>alert(1)</" + "script>" }), buttons: [
+            ["Run valid", (ui) => post("/api/sanitize", ui.text)],
+            ["Fail non-string", () => post("/api/sanitize", '{"text":42}')],
+          ] },
+        { title: "URL · validateUrl", desc: "Only ?ok=<lowercase-alnum-dash> is allowed; duplicates are rejected.",
+          inputs: [["ok", "ok", "hello"]], buttons: [
+            ["Run valid", (ui) => get(`/api/url?ok=${encodeURIComponent(ui.get("ok"))}`)],
+            ["Fail extra key", () => get("/api/url?ok=hello&bad=1")],
+            ["Fail pattern", () => get("/api/url?ok=HELLO")],
+          ] },
+        { title: "CORS · cors()", desc: "Local origins are echoed, same-origin gets *, other origins get 403.",
+          hint: "curl -H 'Origin: http://evil.example' -i localhost:8790/api/cors → 403", buttons: [
+            ["Run GET", () => get("/api/cors")],
+            ["Preflight OPTIONS", () => request("OPTIONS", "/api/cors")],
+          ] },
+        { title: "IP filter · ipFilter", desc: "Allowlist passes from loopback; the blocked companion route returns 403.",
+          buttons: [["Run allowlist", () => get("/api/ip")], ["Run blocked route", () => get("/api/ip-blocked")]] },
+        { title: "Cookies · cookies('sid')", desc: "Sets sid scoped to /api/cookies for the pass, then clears it for 401.",
+          buttons: [["Run pass + fail", async () => {
+            document.cookie = "sid=demo-session; Path=/api/cookies";
+            const pass = await get("/api/cookies");
+            document.cookie = "sid=; Path=/api/cookies; Max-Age=0";
+            return [pass, await get("/api/cookies")];
+          }]] },
+        { title: "Cache · smartCache", desc: "Two GETs inside 15s: identical handlerRuns/generatedAt proves a hit.",
+          buttons: [["Run twice (compare)", async () => [await get("/api/cache"), await get("/api/cache")]]] },
+        { title: "CSRF · csrf()", desc: "GET issues csrf_token cookie; POST without header 403, with header 200.",
+          buttons: [["Run 3-step flow", async () => {
+            const first = await get("/api/csrf");
+            const token = JSON.parse(first.body).token;
+            const noToken = await post("/api/csrf", "{}");
+            const withToken = await post("/api/csrf", "{}", { ...ctJson, "x-csrf-token": token });
+            return [first, noToken, withToken];
+          }]] },
+        { title: "Session · session()", desc: "In-memory session store; the visit counter persists via /api/session cookie.",
+          buttons: [["Run twice", async () => [await get("/api/session"), await get("/api/session")]]] },
+        { title: "JWT · jwtAuth + jwtRefresh", desc: "No external credentials: login issues a demo pair in memory.",
+          buttons: [
+            ["Login → /me → refresh", async () => {
+              const login = await request("POST", "/api/jwt/login");
+              const tokens = JSON.parse(login.body);
+              const me = await get("/api/jwt/me", { authorization: `Bearer ${tokens.accessToken}` });
+              const refresh = await request("POST", "/api/jwt/refresh", { headers: { "x-refresh-token": tokens.refreshToken } });
+              return [login, me, refresh];
+            }],
+            ["Fail /me without token", () => get("/api/jwt/me")],
+          ] },
+        { title: "Async guard + async handler", desc: "The response waits for 80ms guard + 40ms + 60ms handler steps.",
+          inputs: [["delay", "extra delay ms", "0"]], buttons: [
+            ["Run", (ui) => get(`/api/async?delay=${encodeURIComponent(ui.get("delay") || "0")}`)],
+            ["Fail delay=5000", () => get("/api/async?delay=5000")],
+          ] },
+      ];
+
+      function makeCard(demo) {
+        const card = document.createElement("article");
+        card.className = "card";
+        card.innerHTML = `<h2></h2><p class="desc"></p><div class="fields"></div><div class="actions"></div><pre class="out">ready</pre>`;
+        card.querySelector("h2").textContent = demo.title;
+        card.querySelector(".desc").textContent = demo.desc;
+        if (demo.hint) {
+          const hint = document.createElement("div");
+          hint.className = "hint";
+          hint.textContent = demo.hint;
+          card.querySelector(".desc").after(hint);
+        }
+
+        const fields = card.querySelector(".fields");
+        const inputs = new Map();
+        for (const [name, label, value] of demo.inputs ?? []) {
+          const wrap = document.createElement("label");
+          wrap.textContent = label;
+          const input = document.createElement("input");
+          input.value = value;
+          wrap.append(input);
+          fields.append(wrap);
+          inputs.set(name, input);
+        }
+        let textarea;
+        if (demo.text !== undefined) {
+          textarea = document.createElement("textarea");
+          textarea.value = demo.text;
+          textarea.spellcheck = false;
+          fields.append(textarea);
+        }
+        let fileInput;
+        if (demo.file) {
+          fileInput = document.createElement("input");
+          fileInput.type = "file";
+          fields.append(fileInput);
+        }
+        const ui = { get: (name) => (inputs.get(name)?.value ?? "").trim(), get text() { return textarea?.value ?? ""; }, get file() { return fileInput?.files?.[0] ?? null; } };
+
+        const out = card.querySelector(".out");
+        for (const [label, run] of demo.buttons) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", async () => {
+            out.className = "out waiting";
+            out.textContent = "waiting…";
+            try {
+              out.textContent = format(await run(ui));
+              out.className = "out";
+            } catch (error) {
+              out.className = "out error";
+              out.textContent = `network error: ${error.message}`;
+            }
+          });
+          card.querySelector(".actions").append(button);
+        }
+        return card;
+      }
+
+      const grid = document.getElementById("grid");
+      for (const demo of demos) grid.append(makeCard(demo));
+    </script>
+  </body>
+</html>
