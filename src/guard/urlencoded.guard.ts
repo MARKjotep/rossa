@@ -1,5 +1,11 @@
 import { createGuard } from "./@/base.guard";
 import { sendError } from "@/http/res";
+import {
+  checkContentLength,
+  payloadTooLarge,
+  readBodyWithinLimit,
+  resolveMaxSize,
+} from "./shared/body-cap.util";
 import { formDataToObject } from "./shared/form-data.util";
 
 export interface UrlencodedOptions {
@@ -13,10 +19,24 @@ export interface UrlencodedOptions {
    * @default false
    */
   strict?: boolean;
+  /**
+   * Maximum accepted request-body size, in bytes.
+   *
+   * The declared `Content-Length` is checked first, then the bytes actually
+   * received, so an understated header cannot bypass the cap. Over-limit
+   * payloads are rejected with `413` before the form is parsed and never reach
+   * the route. The `413` status and message match `json()`'s limit response.
+   *
+   * @default 1048576 (1 MiB, same default as `json()`)
+   */
+  maxSize?: number;
 }
 
 /** Matches a `%` that is not followed by a two-digit hex escape. */
 const MALFORMED_PERCENT = /%(?![0-9A-Fa-f]{2})/;
+
+/** Media type handled by this guard. */
+const URLENCODED_TYPE = "application/x-www-form-urlencoded";
 
 /**
  * Parses an URL-encoded form request and stores its fields in `ctx.form`.
@@ -26,22 +46,34 @@ const MALFORMED_PERCENT = /%(?![0-9A-Fa-f]{2})/;
  * `urlencoded({ strict: true })` to reject them with the guard's error config
  * (400 by default).
  *
- * @param options - Optional `strict` parsing mode.
+ * Bodies are capped at 1 MiB like `json()`; pass `urlencoded({ maxSize })` to
+ * change the limit. Over-limit payloads answer `413` before parsing.
+ *
+ * @param options - Optional `strict` parsing mode and `maxSize` body cap.
  * @param overrideConfig - Per-call error status/message/headers.
  * @returns A guard factory that parses URL-encoded form data before continuing.
  */
 export const urlencoded = createGuard<UrlencodedOptions>(
   async (ctx, next, options, errorConfig) => {
-    const contentType =
-      ctx.req.headers.get("content-type")?.toLowerCase() ?? "";
-    if (!contentType.startsWith("application/x-www-form-urlencoded")) {
+    const contentTypeHeader = ctx.req.headers.get("content-type") ?? "";
+    if (!contentTypeHeader.toLowerCase().startsWith(URLENCODED_TYPE)) {
       return next();
     }
+
+    // 1. Reject over-limit payloads from the declared size before reading.
+    const maxAllowedBytes = resolveMaxSize(options?.maxSize);
+    const declaredError = checkContentLength(ctx.req.headers, maxAllowedBytes);
+    if (declaredError) return declaredError;
 
     if (options?.strict) {
       // Strict mode owns body reading so the raw payload can be inspected
       // before decoding. `ctx.req.text()` caches the text for later readers.
       const rawText = await ctx.req.text();
+
+      // 2. Re-check the buffered size: Content-Length may be absent or lie.
+      if (new TextEncoder().encode(rawText).byteLength > maxAllowedBytes) {
+        return payloadTooLarge(maxAllowedBytes);
+      }
 
       if (MALFORMED_PERCENT.test(rawText) || rawText.includes("\u0000")) {
         return sendError(errorConfig);
@@ -61,7 +93,13 @@ export const urlencoded = createGuard<UrlencodedOptions>(
     }
 
     try {
-      const formData = await ctx.req.request.formData();
+      // 2. Re-check the buffered size: Content-Length may be absent or lie.
+      const body = await readBodyWithinLimit(ctx.req.request, maxAllowedBytes);
+      if (body instanceof Response) return body;
+
+      const formData = await new Response(body, {
+        headers: { "content-type": contentTypeHeader },
+      }).formData();
       ctx.req["_formData"] = formData;
       ctx.form = formDataToObject(formData);
     } catch {

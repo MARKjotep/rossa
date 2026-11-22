@@ -323,9 +323,11 @@ type ErrorConfig = {
     /** Redirect target; when set the guard answers `302` instead of an error body. */
     redirect?: string | undefined;
     /**
-     * Extra response headers merged into the response as-is. CORS headers are
-     * **not** added automatically: pass `Access-Control-Allow-Origin` here (or
-     * mount `cors`) when a browser must read the error response.
+     * Extra response headers merged into the response. Invalid header names are
+     * dropped and CR/LF/NUL/other unserializable value characters are removed
+     * before the response is built. CORS headers are **not** added automatically:
+     * pass `Access-Control-Allow-Origin` here (or mount `cors`) when a browser must
+     * read the error response.
      */
     headers?: Record<string, string> | undefined;
     error?: (ctx: ctx) => Response;
@@ -381,6 +383,27 @@ declare class StaticFileServer {
 }
 
 type HeaderObject = Record<string, string>;
+/**
+ * Returns `true` when `url` is a safe origin-relative redirect target.
+ *
+ * The target must start with a single `/` and must not become an absolute,
+ * protocol-relative, backslash, or scheme target after percent-decoding (up to
+ * three times, covering double/triple-encoded authority tricks). Use it before
+ * forwarding user input to {@link res.redirect}, or use
+ * {@link res.redirectLocal} which applies the same validation.
+ *
+ * @example
+ * ```ts
+ * isLocalRedirectTarget("/dashboard");        // true
+ * isLocalRedirectTarget("https://evil.test"); // false
+ * isLocalRedirectTarget("//evil.test");       // false
+ * isLocalRedirectTarget("/%2f%2fevil.test");  // false
+ * ```
+ *
+ * @param url - Candidate redirect target.
+ * @returns Whether the target stays on the current origin.
+ */
+declare function isLocalRedirectTarget(url: string): boolean;
 interface RespoOptions {
     /** Compression encoding to apply to generated response bodies. */
     encoding?: ContentEncodingType;
@@ -465,6 +488,11 @@ declare class res {
      * Adds or replaces response headers. `Vary` values are merged without
      * duplicates so callers can add negotiation dimensions incrementally.
      *
+     * Header values are sanitized on write: CR, LF, NUL, other control
+     * characters, and code points that `Headers` cannot serialize are removed so
+     * a value derived from user input can never inject extra headers or poison
+     * the response builder. Invalid header names are ignored.
+     *
      * @param input - A header builder or a map of header names to values.
      * @returns This response builder for chaining.
      */
@@ -519,10 +547,30 @@ declare class res {
     /**
      * Creates an empty redirect response with a `Location` header.
      *
+     * The target is used as-is (absolute and external targets are allowed), so
+     * validate untrusted input first with {@link isLocalRedirectTarget} or use
+     * {@link redirectLocal}. CR/LF/NUL and other control characters are removed
+     * from the target so it cannot inject additional headers.
+     *
      * @param url - Destination URL placed in the `Location` header.
      * @param status - Redirect status code; defaults to `302`.
      */
     redirect(url: string, status?: number): Response;
+    /**
+     * Redirects only to an origin-relative (`/…`) target.
+     *
+     * Uses {@link isLocalRedirectTarget} to reject absolute URLs,
+     * protocol-relative (`//host`), backslash, scheme (`javascript:`, `data:`),
+     * and encoded-authority targets (decoded up to three times). An invalid
+     * target is answered with `400` and the JSON body
+     * `{"success":false,"error":"Invalid redirect target"}`; no `Location`
+     * header is emitted.
+     *
+     * @param url - Origin-relative destination, for example `/dashboard`.
+     * @param status - Redirect status code; defaults to `302`.
+     * @returns A `302` redirect or a `400` JSON error response.
+     */
+    redirectLocal(url: string, status?: number): Response;
     /**
      * use fileserver to serve the file securely.
      */
@@ -542,6 +590,14 @@ declare class res {
      */
     file(file: BunFile | Uint8Array, meta?: FileMeta, extraHeaders?: Heder | HeaderObject): Promise<Response>;
     /**
+     * Builds the headers shared by every SSE response. SSE bodies are streamed
+     * uncompressed, so a negotiated `Content-Encoding` (for example `br` from the
+     * request's `Accept-Encoding`) is deliberately removed: advertising an
+     * encoding the stream does not use makes browsers and Bun `fetch` fail to
+     * decode the frames.
+     */
+    private _eventHeaders;
+    /**
      * Returns Server-Sent Events (SSE) response helpers.
      *
      * SSE keeps an HTTP response open so the server can push events to a client.
@@ -555,8 +611,11 @@ declare class res {
      *   framing and lifecycle control.
      *
      * Each helper returns a `text/event-stream` response and disables Bun's
-     * request timeout for the current request. If this response builder was
-     * created without a Bun server, its helpers return a `500` response.
+     * request timeout for the current request. SSE frames are always sent
+     * uncompressed: `Content-Encoding` is omitted even when the client advertises
+     * `gzip`/`br`, so `EventSource` and `fetch` can decode the stream without a
+     * header override. If this response builder was created without a Bun server,
+     * its helpers return a `500` response.
      * Consumers can listen in browsers with `EventSource`; SSE is one-way, from
      * server to client. Use WebSockets when clients also need to send live data.
      */
@@ -676,6 +735,16 @@ declare class Methods {
 }
 
 type TopicPublishStatus = "sent" | "backpressured" | "dropped" | "oversize";
+/**
+ * Outcome of publishing one payload to one topic.
+ *
+ * `backpressured` maps Bun's `ws.publish()` returning `-1`: at least one peer's
+ * outbound buffer is past Bun's drain threshold. It is a Bun-internal signal,
+ * not an application-reachable branch: in-process peers read from their
+ * sockets, so app code cannot force `-1` (see `ws.send()`/`drain` for the
+ * observable backpressure path). It is not a testable manager result; the
+ * union keeps it only because Bun can return it.
+ */
 interface TopicPublishResult {
     topic: string;
     status: TopicPublishStatus;
@@ -692,7 +761,12 @@ declare class subManager {
     isAdmin(topic: string): boolean;
     isSubscribed(topic: string): boolean;
     setTopicConfig(topic: string, config?: WssConfig): void;
-    /** Publishes to unique topics and returns Bun's outcome for each topic. */
+    /**
+     * Publishes to unique topics and returns Bun's outcome for each topic.
+     *
+     * `backpressured` is Bun-internal (a peer past the outbound drain threshold)
+     * and cannot be produced from application code; see `TopicPublishResult`.
+     */
     broadcast(topics: string[], data: any): TopicPublishResult[];
 }
 declare class WssManager {
@@ -726,14 +800,26 @@ declare class WssManager {
     isAdmin(id: string, topic: string): boolean;
     /** 4. Security & Config Helpers */
     isPayloadTooLarge(topic: string, byteLength: number): boolean;
+    /** True when `topic` already has `maxClients` members. */
+    isTopicFull(topic: string): boolean;
+    /**
+     * Returns the first candidate topic that is at capacity, or `null`.
+     * Used by the pre-upgrade handshake check.
+     */
+    findFullTopic(topics: Iterable<string>): string | null;
     /** Helper to get the correct config for any topic */
     private getConfigForTopic;
     setTopicConfig(topic: string, config?: WssConfig): void;
     /** Broadcast to an array of topics */
     /**
      * Publishes an encoded payload to each unique topic within that topic's
-     * configured byte limit. Bun's `-1` result is reported as backpressured,
-     * `0` as dropped, and a positive result as sent.
+     * configured byte limit.
+     *
+     * `oversize` is decided before publishing. Bun's `0` is reported as
+     * `dropped`, a positive result as `sent`, and `-1` as `backpressured`.
+     * `backpressured` is Bun-internal (a peer past the outbound drain threshold);
+     * in-process app code cannot force it and no application branch or unit test
+     * should depend on it.
      */
     broadcastToTopics(ws: ServerWebSocket<any>, topics: string[], data: unknown): TopicPublishResult[];
     /** Ensures all topics for a client are cleaned up on disconnect */
@@ -742,7 +828,13 @@ declare class WssManager {
 
 declare const WSSMAN: WssManager;
 interface WssConfig {
+    /**
+     * Maximum members in this topic. Checked before the HTTP upgrade for topics
+     * returned by `Websocket.capacityTopics()` (over-capacity upgrades answer
+     * `503`), and again by `subscribe()` as the late-join fallback.
+     */
     maxClients?: number;
+    /** Maximum broadcast payload bytes for this topic. */
     maxPayloadSize?: number;
 }
 /** Fixed-window incoming message limit applied independently to each socket. */
@@ -765,11 +857,50 @@ declare class Websocket<T extends Record<string, any> = Record<string, any>> {
     contextData: Record<string, any>;
     data: T;
     constructor();
+    /**
+     * Topics whose `maxClients` should be checked before the HTTP upgrade.
+     *
+     * Override this to let Rossa reject an over-capacity handshake with `503`
+     * instead of accepting a socket that cannot subscribe. The upgrade has not
+     * happened yet, so `this.ws` and `this.manager` are not available; use the
+     * `ctx` argument (guards have already populated `ctx.data`) or the instance's
+     * `contextData`.
+     *
+     * Return an empty array (the default) when the topic is only known after the
+     * handshake. In that case `subManager.subscribe()` still enforces
+     * `maxClients` and throws `TopicCapacityError`.
+     *
+     * Configure the topic's `maxClients` before the upgrade (module scope, a
+     * guard, or `WSSMAN.setTopicConfig`) — `open()` has not run yet when this is
+     * called.
+     */
+    capacityTopics(_ctx: ctx): string[];
     open(): Promise<void> | void;
     message({ text, json, topic }: wssMessage): Promise<void> | void;
     /** Called when Bun has drained buffered outbound data for this connection. */
     drain(): Promise<void> | void;
+    /**
+     * Disconnect lifecycle hook, called by Rossa when Bun reports the socket
+     * closed. Runs **before** `manager.cleanup()`, so subscriptions, topics and
+     * admin flags are still readable here.
+     *
+     * This method is a notification callback, not a way to close the socket.
+     * Use {@link terminate} (or `this.ws.close`) to close from application code.
+     */
+    onClose(code: number, reason: string): Promise<void> | void;
+    /**
+     * @deprecated Override {@link onClose} instead. This alias is still invoked
+     * on disconnect when a subclass overrides `close()` without overriding
+     * `onClose()`, and runs before `manager.cleanup()`.
+     */
     close(code: number, reason: string): Promise<void> | void;
+    /**
+     * Closes this connection from application code.
+     *
+     * Bun then reports the close, so `onClose(code, reason)` runs first and
+     * `manager.cleanup()` follows. Defaults to a normal `1000` closure.
+     */
+    terminate(code?: number, reason?: string): void;
     set send(message: string | Bun.BufferSource);
 }
 
@@ -1309,6 +1440,12 @@ interface ErrorGuardOptions {
  * Catches errors thrown by downstream guards or handlers and returns a safe
  * 500 response unless a custom handler is provided. Place it before the guards
  * and handlers whose errors it should catch.
+ *
+ * Header values set through `res.header()` are sanitized when written, and the
+ * `res.error`/`res.json` assembler drops any remaining invalid header, so an
+ * input such as `?v=a%0d%0aX-Injected:%201` produces a normal safe response
+ * instead of a dropped connection. If assembly still fails, this guard answers
+ * with a header-free plain-text `500`.
  *
  * @param options - Logging, public message, and custom error response behavior.
  * @returns A guard factory that wraps downstream execution with error handling.
@@ -1986,6 +2123,19 @@ type logFN = {
  */
 declare const loggerFN: (options?: ((ff: logFN) => any) | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
+interface MultipartOptions {
+    /**
+     * Maximum accepted request-body size, in bytes.
+     *
+     * The declared `Content-Length` is checked first, then the bytes actually
+     * received, so an understated header cannot bypass the cap. Over-limit
+     * payloads are rejected with `413` before the form is parsed and never reach
+     * the route. The `413` status and message match `json()`'s limit response.
+     *
+     * @default 1048576 (1 MiB, same default as `json()`)
+     */
+    maxSize?: number;
+}
 /**
  * Parses a multipart request and stores its fields and uploaded files in
  * `ctx.form`.
@@ -1994,9 +2144,13 @@ declare const loggerFN: (options?: ((ff: logFN) => any) | undefined, overrideCon
  * including when Bun's parser reports `File.type` as empty. Field names,
  * file names, sizes, and bytes are unchanged.
  *
+ * Bodies are capped at 1 MiB like `json()`; pass `multipart({ maxSize })` to
+ * change the limit. Over-limit payloads answer `413` before parsing.
+ *
+ * @param options - Optional `maxSize` body cap.
  * @returns A guard factory that parses multipart form data before continuing.
  */
-declare const multipart: (options?: void | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const multipart: (options?: MultipartOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 /** Options accepted by {@link validateQuery}. */
 interface QueryValidationOptions {
@@ -2374,6 +2528,17 @@ interface UrlencodedOptions {
      * @default false
      */
     strict?: boolean;
+    /**
+     * Maximum accepted request-body size, in bytes.
+     *
+     * The declared `Content-Length` is checked first, then the bytes actually
+     * received, so an understated header cannot bypass the cap. Over-limit
+     * payloads are rejected with `413` before the form is parsed and never reach
+     * the route. The `413` status and message match `json()`'s limit response.
+     *
+     * @default 1048576 (1 MiB, same default as `json()`)
+     */
+    maxSize?: number;
 }
 /**
  * Parses an URL-encoded form request and stores its fields in `ctx.form`.
@@ -2383,7 +2548,10 @@ interface UrlencodedOptions {
  * `urlencoded({ strict: true })` to reject them with the guard's error config
  * (400 by default).
  *
- * @param options - Optional `strict` parsing mode.
+ * Bodies are capped at 1 MiB like `json()`; pass `urlencoded({ maxSize })` to
+ * change the limit. Over-limit payloads answer `413` before parsing.
+ *
+ * @param options - Optional `strict` parsing mode and `maxSize` body cap.
  * @param overrideConfig - Per-call error status/message/headers.
  * @returns A guard factory that parses URL-encoded form data before continuing.
  */
@@ -2428,5 +2596,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
-export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, isLocalRedirectTarget, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
+export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, MultipartOptions, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };

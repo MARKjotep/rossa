@@ -8,9 +8,11 @@ export type ErrorConfig = {
   /** Redirect target; when set the guard answers `302` instead of an error body. */
   redirect?: string | undefined;
   /**
-   * Extra response headers merged into the response as-is. CORS headers are
-   * **not** added automatically: pass `Access-Control-Allow-Origin` here (or
-   * mount `cors`) when a browser must read the error response.
+   * Extra response headers merged into the response. Invalid header names are
+   * dropped and CR/LF/NUL/other unserializable value characters are removed
+   * before the response is built. CORS headers are **not** added automatically:
+   * pass `Access-Control-Allow-Origin` here (or mount `cors`) when a browser must
+   * read the error response.
    */
   headers?: Record<string, string> | undefined;
   error?: (ctx: ctx) => Response;
@@ -32,6 +34,25 @@ const STATUS_MESSAGES: Record<number, string> = {
   503: "Service Unavailable",
 };
 
+/** Header name/field-value characters Bun's `Headers` accepts. */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const INVALID_HEADER_VALUE = /[^\t\x20-\x7e\x80-\xff]/g;
+
+/** Copies only entries that can safely be handed to `new Response`. */
+function safeHeaderSet(
+  input: Record<string, string> | undefined,
+): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input ?? {})) {
+    if (!HEADER_NAME_PATTERN.test(name)) continue;
+    output[name] = sanitizeValue(value);
+  }
+  return output;
+}
+
+const sanitizeValue = (value: unknown): string =>
+  String(value ?? "").replace(INVALID_HEADER_VALUE, "");
+
 /**
  * Builds a JSON error response (`{ success: false, error, details? }`).
  *
@@ -48,12 +69,10 @@ export function sendError(config: ErrorConfig, details?: any): Response {
   const code = config.code ?? 400;
 
   // Only use explicitly provided headers; CORS is owned by the cors guard.
-  const headers: Record<string, string> = {
-    ...(config.headers || {}),
-  };
+  const headers: Record<string, string> = safeHeaderSet(config.headers);
 
   if (config.redirect) {
-    headers["Location"] = config.redirect;
+    headers["Location"] = sanitizeValue(config.redirect);
     return new Response(null, {
       status: 302,
       headers,

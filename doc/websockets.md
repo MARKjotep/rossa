@@ -56,7 +56,23 @@ The server controller has these hooks:
 | `open()` | The server accepted the connection. It may immediately send a welcome/ready message or subscribe to a room. |
 | `message({ text, json, topic })` | The server received a client frame. The client should send text frames; JSON is the normal application format. |
 | `drain()` | Bun drained buffered outbound data. This is server-side backpressure handling; it is not a client event. |
-| `close(code, reason)` | The connection is closing or closed. The client should surface the code/reason and reconnect only according to application policy. |
+| `onClose(code, reason)` | The connection is closing or closed. Runs before `manager.cleanup()`. The client should surface the code/reason and reconnect only according to application policy. |
+| `capacityTopics(ctx)` | Before the upgrade, the controller declares the topics it will join so Rossa can enforce `maxClients`. Not a client event. |
+
+`onClose()` is a notification hook; it is not how the server closes a socket.
+Server-side close is `this.terminate(code, reason)` (or `this.ws.close(...)`),
+after which Bun reports the close and `onClose()` runs. The former
+`close(code, reason)` hook is deprecated: it still runs when a subclass
+overrides it (and `onClose()` is not overridden), but new code should implement
+`onClose()`.
+
+If the controller declares topics through `capacityTopics(ctx)` and one is
+already full, the upgrade is answered with HTTP `503 Service Unavailable` before
+the WebSocket handshake. The client sees a failed connection attempt, not a
+socket that opens and cannot subscribe; it should treat `503` as "room full"
+(for example, retry later or choose another room) rather than a protocol error.
+Topics not declared there keep the later `subscribe()` throw and the
+application's own close policy.
 
 The client runtime receives the standard WebSocket events: open, message,
 error, and close. Rossa does not send a mandatory welcome frame or heartbeat;
@@ -145,6 +161,18 @@ admin flags, broadcast, and cleanup. It is a server-side process-local manager;
 clients do not send manager methods directly. The default maximum topic payload
 is 65,536 bytes and the default client cap is unlimited. A controller can set
 per-topic `maxPayloadSize` and `maxClients` before subscribing members.
+
+A full topic is normally detected when `subscribe()` throws. To reject the
+handshake instead, declare the topic in `capacityTopics(ctx)`: the upgrade then
+answers `503` before any socket opens. The declaration runs after guards, so
+`ctx.data` carries auth and room selection, but `this.ws` and `this.manager` do
+not exist yet.
+
+Broadcast results use `sent` (`> 0`), `dropped` (`0`), `oversize` (pre-publish
+short-circuit), and `backpressured` (Bun `-1`). `backpressured` is Bun-only: it
+needs a peer past Bun's outbound drain threshold, and in-process peers always
+read, so application code cannot force it. Treat it as a pass-through status
+rather than an app branch.
 
 The second argument to `app.serve(serverOptions, websocketOptions)` accepts
 Bun WebSocket settings such as `maxPayloadLength`. Rossa's optional

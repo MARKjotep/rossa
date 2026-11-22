@@ -4,9 +4,27 @@ import type { ServerWebSocket } from "bun";
 export type TopicPublishStatus =
   "sent" | "backpressured" | "dropped" | "oversize";
 
+/**
+ * Outcome of publishing one payload to one topic.
+ *
+ * `backpressured` maps Bun's `ws.publish()` returning `-1`: at least one peer's
+ * outbound buffer is past Bun's drain threshold. It is a Bun-internal signal,
+ * not an application-reachable branch: in-process peers read from their
+ * sockets, so app code cannot force `-1` (see `ws.send()`/`drain` for the
+ * observable backpressure path). It is not a testable manager result; the
+ * union keeps it only because Bun can return it.
+ */
 export interface TopicPublishResult {
   topic: string;
   status: TopicPublishStatus;
+}
+
+/** Thrown by `subscribe()` when a topic already has `maxClients` members. */
+export class TopicCapacityError extends Error {
+  constructor(public readonly topic: string) {
+    super("Topic capacity reached");
+    this.name = "TopicCapacityError";
+  }
 }
 
 export class subManager {
@@ -41,7 +59,12 @@ export class subManager {
   setTopicConfig(topic: string, config: WssConfig = {}): void {
     WSSMAN.setTopicConfig(topic, config);
   }
-  /** Publishes to unique topics and returns Bun's outcome for each topic. */
+  /**
+   * Publishes to unique topics and returns Bun's outcome for each topic.
+   *
+   * `backpressured` is Bun-internal (a peer past the outbound drain threshold)
+   * and cannot be produced from application code; see `TopicPublishResult`.
+   */
   broadcast(topics: string[], data: any): TopicPublishResult[] {
     return WSSMAN.broadcastToTopics(this.ws, topics, data);
   }
@@ -110,7 +133,7 @@ export class WssManager {
     const members = this.topicRegistry.get(topic) ?? new Set<string>();
 
     if (members.size >= (config.maxClients ?? Infinity)) {
-      throw new Error("Topic capacity reached");
+      throw new TopicCapacityError(topic);
     }
 
     if (!ws.subscribe(topic)) throw new Error("WebSocket is closed");
@@ -170,6 +193,24 @@ export class WssManager {
     return byteLength > (config.maxPayloadSize ?? 65536);
   }
 
+  /** True when `topic` already has `maxClients` members. */
+  isTopicFull(topic: string): boolean {
+    const config = this.getConfigForTopic(topic);
+    const members = this.topicRegistry.get(topic)?.size ?? 0;
+    return members >= (config.maxClients ?? Infinity);
+  }
+
+  /**
+   * Returns the first candidate topic that is at capacity, or `null`.
+   * Used by the pre-upgrade handshake check.
+   */
+  findFullTopic(topics: Iterable<string>): string | null {
+    for (const topic of new Set(topics)) {
+      if (this.isTopicFull(topic)) return topic;
+    }
+    return null;
+  }
+
   /** Helper to get the correct config for any topic */
   private getConfigForTopic(topic: string): WssConfig {
     if (this.topicConfigs.has(topic)) {
@@ -188,8 +229,13 @@ export class WssManager {
   /** Broadcast to an array of topics */
   /**
    * Publishes an encoded payload to each unique topic within that topic's
-   * configured byte limit. Bun's `-1` result is reported as backpressured,
-   * `0` as dropped, and a positive result as sent.
+   * configured byte limit.
+   *
+   * `oversize` is decided before publishing. Bun's `0` is reported as
+   * `dropped`, a positive result as `sent`, and `-1` as `backpressured`.
+   * `backpressured` is Bun-internal (a peer past the outbound drain threshold);
+   * in-process app code cannot force it and no application branch or unit test
+   * should depend on it.
    */
   broadcastToTopics(
     ws: ServerWebSocket<any>,

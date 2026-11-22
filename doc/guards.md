@@ -89,8 +89,8 @@ avoid calling it more than once.
 | Guard | Use | Behavior |
 | --- | --- | --- |
 | `cookies(name)` | Require a cookie | Continues when the named cookie exists in the request's `Cookie` header; returns 401 when it is missing. The value remains available through `ctx.req.cookies.get(name)`. |
-| `multipart()` | Multipart forms | Parses `multipart/form-data` into `ctx.form`; uploaded values remain `File` objects with their declared MIME type and repeated names become arrays. |
-| `urlencoded()` | HTML forms | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. Pass `{ strict: true }` to reject malformed percent-encoding and NUL bytes. |
+| `multipart()` | Multipart forms | Parses `multipart/form-data` into `ctx.form`; uploaded values remain `File` objects with their declared MIME type and repeated names become arrays. Bodies are capped at 1 MiB by default and answer `413` when over; pass `{ maxSize }` to change it. |
+| `urlencoded()` | HTML forms | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. Pass `{ strict: true }` to reject malformed percent-encoding and NUL bytes. Bodies are capped at 1 MiB by default and answer `413` when over; pass `{ maxSize }` to change it. |
 | `json(schema)` | JSON body | For POST, PUT, and PATCH, checks the content type and 1 MiB default size limit, parses and validates JSON, and puts the validated result on both `ctx.body` and `ctx.req._json`. The schema must be a `z.object(...)` schema. |
 | `keys(names)` | Required body fields | Parses JSON with `ctx.req.json()`, checks top-level keys, then puts the body on `ctx.body`. It does not validate field types. |
 | `validateQuery(schema)` | Query validation | Coerces and validates query values, then stores the result in `ctx.query`. Duplicate query names are reduced to their last value. |
@@ -134,6 +134,25 @@ class SignupController {}
 Strict mode reads the body once and rebuilds the same `FormData` entries, so
 repeated fields and `+`/percent decoding keep working. `validateForm(schema)` is
 unaffected by the option and still performs its own validation.
+
+### Body size caps
+
+`urlencoded()` and `multipart()` default to the same 1 MiB (`1048576` byte)
+limit as `json()`. A larger body is answered with `413` and `json()`'s limit
+message before the handler runs. The guard checks the declared
+`Content-Length` first and the bytes actually received second, so an absent or
+understated header cannot bypass the cap. Pass `maxSize` to change it:
+
+```ts
+@use(urlencoded({ maxSize: 64 * 1024 }))
+class SmallForm {}
+
+@use(multipart({ maxSize: 5 * 1024 * 1024 }))
+class Uploads {}
+```
+
+The limit applies to the whole request body, not to individual fields. Uploads
+that need more must raise `maxSize` explicitly.
 
 ### Uploaded file types
 

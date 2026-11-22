@@ -1,9 +1,16 @@
-import { subManager, WssManager } from "./wss-manager";
+import { TopicCapacityError, subManager, WssManager } from "./wss-manager";
+import { Websocket } from "./websocket.wss";
 
 export const WSSMAN = new WssManager();
 
 export interface WssConfig {
+  /**
+   * Maximum members in this topic. Checked before the HTTP upgrade for topics
+   * returned by `Websocket.capacityTopics()` (over-capacity upgrades answer
+   * `503`), and again by `subscribe()` as the late-join fallback.
+   */
   maxClients?: number;
+  /** Maximum broadcast payload bytes for this topic. */
   maxPayloadSize?: number;
 }
 
@@ -13,6 +20,16 @@ export interface WssMessageRateLimit {
   max: number;
   /** Fixed-window duration in milliseconds. */
   windowMs: number;
+}
+
+const deprecatedCloseWarnings = new WeakSet<Function>();
+
+function warnDeprecatedClose(handler: Function) {
+  if (deprecatedCloseWarnings.has(handler)) return;
+  deprecatedCloseWarnings.add(handler);
+  console.warn(
+    "[rossa] Websocket.close() is deprecated; override onClose(code, reason) instead.",
+  );
 }
 
 export function createSocketConfig(messageRateLimit?: WssMessageRateLimit) {
@@ -52,7 +69,17 @@ export function createSocketConfig(messageRateLimit?: WssMessageRateLimit) {
         ws,
         instance.contextData.chatUser?.nickname,
       );
-      await instance.open();
+      try {
+        await instance.open();
+      } catch (error) {
+        // Fallback for a socket that still raced into `open` without a
+        // pre-upgrade slot: close it instead of leaving it subscribed-free.
+        if (error instanceof TopicCapacityError) {
+          ws.close(1008, "Topic capacity reached");
+          return;
+        }
+        throw error;
+      }
     },
 
     message: async (ws: any, message: string | Buffer) => {
@@ -74,7 +101,18 @@ export function createSocketConfig(messageRateLimit?: WssMessageRateLimit) {
     close: async (ws: any, code: number, reason: string) => {
       const { instance } = ws.data;
       try {
-        await instance.close(code, reason);
+        await instance.onClose(code, reason);
+
+        // Backward compatibility: subclasses written before `onClose` still
+        // override `close()`. Call it only when they did not also override
+        // the new hook, so a subclass never runs both.
+        if (
+          instance.onClose === Websocket.prototype.onClose &&
+          instance.close !== Websocket.prototype.close
+        ) {
+          warnDeprecatedClose(instance.close);
+          await instance.close(code, reason);
+        }
       } finally {
         instance.manager.cleanup();
       }

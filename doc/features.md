@@ -214,8 +214,8 @@ after the global pipeline.
 | `cookies(name)`             | Requires the named cookie to exist; returns `401` when missing. Read the value with `ctx.req.cookies.get(name)`.      |
 | `json(schema)`              | Checks content type and a 1 MiB default limit on POST/PUT/PATCH, parses JSON, validates it, and stores it in both `ctx.body` and `ctx.req._json`. |
 | `keys(names)`               | Parses JSON, checks required top-level keys, then stores the body in `ctx.body`. Does not validate field types.       |
-| `multipart()`               | Parses `multipart/form-data` into `ctx.form`. Uploads stay `File` objects with their declared MIME type; repeated names become arrays. |
-| `urlencoded()`              | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. `{ strict: true }` rejects malformed percent escapes and NUL bytes. |
+| `multipart()`               | Parses `multipart/form-data` into `ctx.form`. Uploads stay `File` objects with their declared MIME type; repeated names become arrays. Bodies default to a 1 MiB cap (`{ maxSize }`). |
+| `urlencoded()`              | Parses `application/x-www-form-urlencoded` into `ctx.form`; repeated names become arrays. `{ strict: true }` rejects malformed percent escapes and NUL bytes. Bodies default to a 1 MiB cap (`{ maxSize }`). |
 | `validateQuery(schema)`     | Coerces and validates query values into `ctx.query`. Duplicate names keep the last value.                             |
 | `validateForm(schema)`      | Parses and validates form values into `ctx.form`. Duplicate names keep the last value.                                |
 | `validateUrl(options?)`     | Checks URL and query length, duplicate or disallowed keys, value patterns, malformed escapes, null bytes, and traversal in the pathname and decoded query string. |
@@ -368,9 +368,39 @@ methods return a standard `Response`.
 | `text(body?)`              | `text/plain; charset=utf-8` response.                                                        |
 | `success(code?, data?, message?)` | JSON `{ success: true, ... }` response.                                               |
 | `error(code, message)`     | Error response; records become JSON, strings become `text/plain`.                            |
-| `redirect(url, status?)`   | Empty redirect with `Location`; default status `302`.                                        |
+| `redirect(url, status?)`   | Empty redirect with `Location`; default status `302`. Accepts any target (see below).         |
+| `redirectLocal(url, status?)` | Redirect only to an origin-relative target; invalid targets answer `400` with no `Location`. |
 | `file(file, meta?, headers?)` | Send a Bun file or `Uint8Array`. Bun files support byte ranges and return `416` for invalid ranges. |
 | `fileServer()`             | Serve the current request through the configured static file server.                          |
+
+#### Redirect targets
+
+`redirect()` forwards its target verbatim by contract, so handlers that pass
+user input straight through can send a visitor to another origin. Use
+`redirectLocal()` (or check the target with the exported
+`isLocalRedirectTarget()`) whenever the destination can be influenced by a
+request:
+
+```ts
+import { isLocalRedirectTarget, type ctx } from "rossa";
+
+get({ req, res }: ctx) {
+  const next = String(req.query.next ?? "/");
+  return res.redirectLocal(next); // 302 /dashboard, or 400 when not local
+}
+
+// Validate first when you need a custom rejection.
+if (!isLocalRedirectTarget(next)) return res.error(400, "Bad next");
+return res.redirect(next);
+```
+
+A local target must start with a single `/` and stay origin-relative after
+percent-decoding (up to three passes, covering double/triple-encoded tricks).
+Absolute URLs, protocol-relative targets (`//host`), backslash forms,
+`javascript:`/`data:` schemes, and control characters are rejected. The
+rejection body is `{"success":false,"error":"Invalid redirect target"}`. Plain
+`redirect()` still cannot inject headers: CR/LF/NUL and other control
+characters are stripped from `Location` on the way out.
 
 For SSE, use the `res.event` helpers:
 
@@ -395,6 +425,13 @@ class Events extends Methods {
 Each SSE helper returns `text/event-stream`, disables Bun's request timeout, and
 returns `500` when the response builder has no live server. SSE is one-way; use
 WebSockets for bidirectional messaging.
+
+SSE responses are always identity-encoded: the helpers remove any
+`Content-Encoding` the builder negotiated, because the frames are written as
+plain text. `res.event.*` therefore works with Bun `fetch`, `EventSource`, and
+browsers without sending `Accept-Encoding: identity` or constructing the app
+with `{ Encoding: "none" }`. Other (non-SSE) responses keep normal content
+negotiation.
 
 ## WebSockets
 
@@ -422,7 +459,7 @@ class Chat extends Websocket {
     // Bun has drained buffered outbound data.
   }
 
-  close(code: number, reason: string) {}
+  onClose(code: number, reason: string) {}
 }
 
 app.registerWSS(Chat);
@@ -435,7 +472,19 @@ app.registerWSS(Chat);
 | `open()`                    | After a successful upgrade.                                                                  |
 | `message({ text, json, topic })` | On each inbound frame. Valid JSON populates `json`; non-JSON text populates `text`.      |
 | `drain()`                   | When Bun has drained buffered outbound data.                                                  |
-| `close(code, reason)`       | When the connection closes.                                                                  |
+| `onClose(code, reason)`     | When the connection closes, before `manager.cleanup()`.                                      |
+| `capacityTopics(ctx)`       | Before the upgrade, to declare topics whose capacity should be checked.                       |
+
+`onClose()` is a notification hook: subscriptions, topics, and admin flags are
+still readable when it runs. It is not a close path. Use
+`this.terminate(code = 1000, reason = "")` (or `this.ws.close(...)`) to close
+from application code; Bun then reports the close, so `onClose()` runs before
+cleanup.
+
+> **Migration:** `Websocket.close(code, reason)` is the former lifecycle hook
+> and is now a deprecated alias for `onClose()`. It still runs when a subclass
+> overrides `close()` without overriding `onClose()`, and Rossa warns once per
+> class. Move those overrides to `onClose()`.
 
 `this.send = value` sends a string or byte buffer to the current socket.
 `this.ws` is the native Bun `ServerWebSocket`. `this.manager` is a
@@ -445,6 +494,33 @@ upgrade are copied to `this.contextData` before `open()`.
 If a JSON frame has a top-level string `topic`, Rossa exposes it as `topic` and
 removes it from `json`. This does not automatically subscribe or route the
 message.
+
+### Pre-handshake capacity
+
+`maxClients` is normally enforced when `subscribe()` runs inside `open()`: an
+unhandled throw there leaves a connected socket that cannot join. Override
+`capacityTopics(ctx)` to let Rossa check capacity before the upgrade:
+
+```ts
+@wss("/rooms/:id")
+class Room extends Websocket {
+  capacityTopics(ctx: ctx) {
+    return [`room:${ctx.params.id}`];
+  }
+
+  open() {
+    this.manager.subscribe(`room:${this.contextData.roomId}`);
+  }
+}
+```
+
+When a declared topic is already at `maxClients`, the upgrade is answered with
+`503 Service Unavailable` and no WebSocket is opened. Guards have run, so
+`ctx.data` (auth/session/room selection) is available; `this.ws` and
+`this.manager` are not. Set the topic's `maxClients` before the upgrade (module
+scope, a guard, or `WSSMAN.setTopicConfig`). Return `[]` (the default) for
+topics only known after the handshake; `subscribe()` then keeps its late-join
+throw as before.
 
 ### Topics and broadcasting
 
@@ -484,9 +560,15 @@ and `get(topic)`. `WssConfig` supports:
 | Status          | Meaning                                                          |
 | --------------- | ---------------------------------------------------------------- |
 | `sent`          | Bun accepted the publish.                                        |
-| `backpressured` | Bun reported `-1`; the socket has buffered data.                 |
+| `backpressured` | Bun reported `-1`; the socket has buffered data (Bun-only).      |
 | `dropped`       | Bun reported `0`; the message was not delivered.                 |
 | `oversize`      | The payload exceeded the topic's `maxPayloadSize`.               |
+
+`backpressured` maps Bun's `ws.publish()` returning `-1`, which needs a peer
+past Bun's outbound drain threshold. Application code cannot force it —
+in-process peers always read — so it is not a testable manager result. Observe
+backpressure through `ws.send()`/`drain()` or Bun's `backpressureLimit`; treat
+`backpressured` as a pass-through status, not an app branch.
 
 ### Limits
 

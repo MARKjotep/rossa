@@ -11,6 +11,7 @@ import { dirname, isAbsolute, join } from "path";
 import { logger, loggerFN } from "@/guard/logger.guard";
 import {
   createSocketConfig,
+  WSSMAN,
   type WssMessageRateLimit,
   type wssMessage,
 } from "@/wss/config.wss";
@@ -324,6 +325,18 @@ export class Rossa extends RouterManager {
     const runLocalPipeline = async (): Promise<Response> => {
       if (localIndex >= guards.length) {
         const _CLASS = new instance();
+        _CLASS.contextData = ctx.data ?? {};
+
+        // Enforce declared topic capacity before accepting the handshake.
+        // Without this, subscribe() throws inside `open` and leaves a
+        // connected but unsubscribed socket.
+        const fullTopic = WSSMAN.findFullTopic(_CLASS.capacityTopics(ctx));
+        if (fullTopic) {
+          return ctx.res.error(
+            503,
+            `WebSocket topic capacity reached: ${fullTopic}`,
+          );
+        }
 
         const upgradeSuccess = ctx.req.server?.upgrade(ctx.req.request, {
           data: {

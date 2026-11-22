@@ -10,6 +10,85 @@ import type { Req } from "../req";
 
 export type HeaderObject = Record<string, string>;
 
+/** RFC 9110 `token` characters accepted as a header field name. */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Characters Bun's `Headers` rejects in a field value: control characters
+ * (including CR/LF/NUL) and code points above Latin-1.
+ */
+const INVALID_HEADER_VALUE = /[^\t\x20-\x7e\x80-\xff]/g;
+
+const isHeaderName = (name: string): boolean => HEADER_NAME_PATTERN.test(name);
+
+/**
+ * Removes characters that would be rejected by `Headers` (or could split a
+ * value into additional headers) so a stored header always serializes safely.
+ */
+const sanitizeHeaderValue = (value: unknown): string =>
+  (value === null || value === undefined ? "" : String(value)).replace(
+    INVALID_HEADER_VALUE,
+    "",
+  );
+
+/**
+ * Removes every header from `input` whose name or value would make `Headers`
+ * throw, returning a fresh object safe to pass to `new Response`.
+ */
+const safeHeaders = (input: HeaderObject): HeaderObject => {
+  const output: HeaderObject = {};
+  for (const [name, value] of Object.entries(input)) {
+    if (!isHeaderName(name)) continue;
+    output[name] = sanitizeHeaderValue(value);
+  }
+  return output;
+};
+
+/**
+ * Returns `true` when `url` is a safe origin-relative redirect target.
+ *
+ * The target must start with a single `/` and must not become an absolute,
+ * protocol-relative, backslash, or scheme target after percent-decoding (up to
+ * three times, covering double/triple-encoded authority tricks). Use it before
+ * forwarding user input to {@link res.redirect}, or use
+ * {@link res.redirectLocal} which applies the same validation.
+ *
+ * @example
+ * ```ts
+ * isLocalRedirectTarget("/dashboard");        // true
+ * isLocalRedirectTarget("https://evil.test"); // false
+ * isLocalRedirectTarget("//evil.test");       // false
+ * isLocalRedirectTarget("/%2f%2fevil.test");  // false
+ * ```
+ *
+ * @param url - Candidate redirect target.
+ * @returns Whether the target stays on the current origin.
+ */
+export function isLocalRedirectTarget(url: string): boolean {
+  if (typeof url !== "string") return false;
+
+  let decoded = url;
+  for (let pass = 0; pass < 3; pass += 1) {
+    if (!decoded.includes("%")) break;
+    try {
+      decoded = decodeURIComponent(decoded);
+    } catch {
+      // A malformed escape cannot resolve to an authority; validate as-is.
+      break;
+    }
+  }
+
+  // Control characters, NUL, and backslashes can confuse URL parsers/browsers.
+  if (/[\u0000-\u001f\u007f\\]/.test(decoded)) return false;
+
+  // Origin-relative only: no scheme, no external authority.
+  if (!decoded.startsWith("/")) return false;
+  // Protocol-relative (`//host`) and backslash-authority (`/\host`) forms.
+  if (decoded.startsWith("//")) return false;
+
+  return true;
+}
+
 export interface RespoOptions {
   /** Compression encoding to apply to generated response bodies. */
   encoding?: ContentEncodingType;
@@ -123,12 +202,19 @@ export class res {
    * Adds or replaces response headers. `Vary` values are merged without
    * duplicates so callers can add negotiation dimensions incrementally.
    *
+   * Header values are sanitized on write: CR, LF, NUL, other control
+   * characters, and code points that `Headers` cannot serialize are removed so
+   * a value derived from user input can never inject extra headers or poison
+   * the response builder. Invalid header names are ignored.
+   *
    * @param input - A header builder or a map of header names to values.
    * @returns This response builder for chaining.
    */
   header(input: Heder | HeaderObject): this {
     const headers = input instanceof Heder ? input.done : input;
-    for (const [name, value] of Object.entries(headers)) {
+    for (const [name, rawValue] of Object.entries(headers)) {
+      if (!isHeaderName(name)) continue;
+      const value = sanitizeHeaderValue(rawValue);
       if (name.toLowerCase() === "vary" && this._headers.Vary) {
         const existing = this._headers.Vary;
         if (existing.trim() === "*") continue;
@@ -169,7 +255,7 @@ export class res {
           ? `${contentType}; charset=utf-8`
           : contentType,
         "Content-Length": payload.length.toString(),
-        ...this._headers,
+        ...safeHeaders(this._headers),
       },
     });
   }
@@ -182,7 +268,7 @@ export class res {
   null(status: number = this._code): Response {
     return new Response(null, {
       status,
-      headers: this._headers,
+      headers: safeHeaders(this._headers),
     });
   }
 
@@ -260,14 +346,49 @@ export class res {
   /**
    * Creates an empty redirect response with a `Location` header.
    *
+   * The target is used as-is (absolute and external targets are allowed), so
+   * validate untrusted input first with {@link isLocalRedirectTarget} or use
+   * {@link redirectLocal}. CR/LF/NUL and other control characters are removed
+   * from the target so it cannot inject additional headers.
+   *
    * @param url - Destination URL placed in the `Location` header.
    * @param status - Redirect status code; defaults to `302`.
    */
   redirect(url: string, status: number = 302): Response {
     return new Response(null, {
       status,
-      headers: { Location: url, ...this._headers },
+      headers: {
+        Location: sanitizeHeaderValue(url),
+        ...safeHeaders(this._headers),
+      },
     });
+  }
+
+  /**
+   * Redirects only to an origin-relative (`/…`) target.
+   *
+   * Uses {@link isLocalRedirectTarget} to reject absolute URLs,
+   * protocol-relative (`//host`), backslash, scheme (`javascript:`, `data:`),
+   * and encoded-authority targets (decoded up to three times). An invalid
+   * target is answered with `400` and the JSON body
+   * `{"success":false,"error":"Invalid redirect target"}`; no `Location`
+   * header is emitted.
+   *
+   * @param url - Origin-relative destination, for example `/dashboard`.
+   * @param status - Redirect status code; defaults to `302`.
+   * @returns A `302` redirect or a `400` JSON error response.
+   */
+  redirectLocal(url: string, status: number = 302): Response {
+    if (!isLocalRedirectTarget(url)) {
+      for (const name of Object.keys(this._headers)) {
+        if (name.toLowerCase() === "location") delete this._headers[name];
+      }
+      return this.error(400, {
+        success: false,
+        error: "Invalid redirect target",
+      });
+    }
+    return this.redirect(url, status);
   }
 
   /**
@@ -313,7 +434,7 @@ export class res {
     const baseHeaders: HeaderObject = {
       "Content-Type": fileType,
       "Accept-Ranges": isBunFile ? "bytes" : "none",
-      ...this._headers,
+      ...safeHeaders(this._headers),
     };
 
     const rangeHeader = isBunFile ? this.req.headers.get("range") : null;
@@ -355,7 +476,10 @@ export class res {
     const rangeNotSatisfiable = () =>
       new Response(null, {
         status: 416,
-        headers: { "Content-Range": `bytes */${fileSize}`, ...this._headers },
+        headers: {
+          "Content-Range": `bytes */${fileSize}`,
+          ...safeHeaders(this._headers),
+        },
       });
 
     const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
@@ -404,6 +528,26 @@ export class res {
   }
 
   /**
+   * Builds the headers shared by every SSE response. SSE bodies are streamed
+   * uncompressed, so a negotiated `Content-Encoding` (for example `br` from the
+   * request's `Accept-Encoding`) is deliberately removed: advertising an
+   * encoding the stream does not use makes browsers and Bun `fetch` fail to
+   * decode the frames.
+   */
+  private _eventHeaders(): HeaderObject {
+    const headers = safeHeaders(this._headers);
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "content-encoding") delete headers[name];
+    }
+    return {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      ...headers,
+    };
+  }
+
+  /**
    * Returns Server-Sent Events (SSE) response helpers.
    *
    * SSE keeps an HTTP response open so the server can push events to a client.
@@ -417,8 +561,11 @@ export class res {
    *   framing and lifecycle control.
    *
    * Each helper returns a `text/event-stream` response and disables Bun's
-   * request timeout for the current request. If this response builder was
-   * created without a Bun server, its helpers return a `500` response.
+   * request timeout for the current request. SSE frames are always sent
+   * uncompressed: `Content-Encoding` is omitted even when the client advertises
+   * `gzip`/`br`, so `EventSource` and `fetch` can decode the stream without a
+   * header override. If this response builder was created without a Bun server,
+   * its helpers return a `500` response.
    * Consumers can listen in browsers with `EventSource`; SSE is one-way, from
    * server to client. Use WebSockets when clients also need to send live data.
    */
@@ -480,12 +627,7 @@ export class res {
         });
 
         return new Response(stream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            ...this._headers,
-          },
+          headers: this._eventHeaders(),
         });
       },
 
@@ -534,12 +676,7 @@ export class res {
         });
 
         return new Response(stream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            ...this._headers,
-          },
+          headers: this._eventHeaders(),
         });
       },
 
@@ -573,12 +710,7 @@ export class res {
         });
 
         return new Response(stream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            ...this._headers,
-          },
+          headers: this._eventHeaders(),
         });
       },
     };

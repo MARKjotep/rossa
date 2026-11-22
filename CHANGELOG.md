@@ -4,6 +4,47 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-11-23
+
+### Fixed
+
+- Redirect targets: untrusted input can no longer send a user to another origin.
+  The fix ships as a dedicated safe-target API — `res.redirectLocal(url)` plus
+  the `isLocalRedirectTarget(url)` helper. Plain `res.redirect` still forwards
+  any target by contract (existing apps keep working) but can no longer inject
+  extra headers: CR/LF/NUL and other control characters are stripped from the
+  `Location` value.
+- Header injection: invalid header values are sanitized when written and again
+  when the response is assembled, so a CRLF value can no longer poison the
+  builder or drop the connection. `errorHandler()` always answers with a safe
+  response (and falls back to a header-free plain-text `500` if assembly still
+  throws).
+- Body caps: `urlencoded()` and `multipart()` now default to the same 1 MiB
+  limit as `json()` and answer `413` with the same error shape. The declared
+  `Content-Length` and the bytes actually received are both checked, so a
+  lying header cannot bypass the cap.
+- SSE: `res.event.*` responses no longer advertise a `Content-Encoding` they do
+  not apply. Streams are identity-encoded and decodable by Bun `fetch` and
+  browsers without an `Accept-Encoding: identity` override. Normal compressed
+  responses are unchanged.
+
+### Added
+
+- `res.redirectLocal(url, status?)` and `isLocalRedirectTarget(url)` for
+  origin-relative-only redirects. Invalid targets answer
+  `400 {"success":false,"error":"Invalid redirect target"}` with no `Location`.
+- `urlencoded({ maxSize })` and `multipart({ maxSize })` body-size caps.
+- WebSocket pre-handshake capacity rejection: override `capacityTopics(ctx)` to
+  declare the topics a socket will join; a full topic answers the upgrade with
+  `503 Service Unavailable` before the handshake instead of delivering a socket
+  that cannot subscribe.
+- `Websocket.onClose(code, reason)` lifecycle hook (runs before
+  `manager.cleanup()`) and `Websocket.terminate(code?, reason?)` as the single
+  app-side close path. The old `Websocket.close()` hook is deprecated as an
+  alias.
+- `backpressured` is documented as a Bun `-1`-only status that application code
+  cannot force; it stays in the publish-result union because Bun can return it.
+
 ## [0.1.2] - 2026-11-23
 
 ### ⚠️ Behavior change

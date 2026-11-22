@@ -80,7 +80,7 @@ export type {
 export { ctx } from "./http/ctx";
 export { Req } from "./http/req";
 export { Res } from "./http/res";
-export { sendError } from "./http/res";
+export { isLocalRedirectTarget, sendError } from "./http/res";
 export type { ErrorConfig } from "./http/res";
 
 export { Websocket } from "./wss/websocket.wss";

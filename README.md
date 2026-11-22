@@ -93,13 +93,23 @@ path, including `OPTIONS`. OPTIONS on an undeclared path returns `404`, and a
 is no automatic GET fallback.
 
 Useful response methods include `text`, `html`, `json`, `success`, `error`,
-`redirect`, `null`, `file`, and `fileServer`. Route parameters are exposed as
-strings on `ctx.params`; query parameters are available from `ctx.req.query`.
-Guards may place validated values on `ctx.query`, `ctx.body`, or `ctx.form`.
+`redirect`, `redirectLocal`, `null`, `file`, and `fileServer`. Route parameters
+are exposed as strings on `ctx.params`; query parameters are available from
+`ctx.req.query`. Guards may place validated values on `ctx.query`, `ctx.body`,
+or `ctx.form`.
+
+`redirect(url)` forwards any target by contract. When the destination comes from
+user input, use `res.redirectLocal(url)` or check it with the exported
+`isLocalRedirectTarget(url)`: only origin-relative targets pass, and an invalid
+target answers `400 {"success":false,"error":"Invalid redirect target"}` with no
+`Location`.
 
 For SSE, a GET request whose `Accept` header allows `text/event-stream` routes
 to `event`. Return `res.event.asyncStream(...)`, `res.event.eStream(...)`, or
-`res.event.readableStream(...)`; these require a live Bun server.
+`res.event.readableStream(...)`; these require a live Bun server. SSE responses
+are identity-encoded — the helpers drop any negotiated `Content-Encoding` — so
+browsers and Bun `fetch` decode frames without an `Accept-Encoding: identity`
+override.
 
 ## Guards
 
@@ -125,6 +135,9 @@ class Api extends Methods {
 `app.use` prepends guards, so a guard registered later runs earlier. Place
 wrapper guards such as `errorHandler` and `security` before the work whose
 response they should wrap.
+
+`urlencoded()` and `multipart()` cap bodies at the same 1 MiB default as
+`json()` and answer `413` when over; pass `{ maxSize }` to change the limit.
 
 The public entry point exports guard factories for authentication
 (`authBearer`, `apiKey`, `auth`, `authorize`), caching (`smartCache`), content
@@ -201,7 +214,7 @@ class Chat extends Websocket {
   message(message: wssMessage) {
     this.send = JSON.stringify(message);
   }
-  close(code: number, reason: string) {}
+  onClose(code: number, reason: string) {}
 }
 
 app.registerWSS(Chat);
@@ -222,10 +235,21 @@ closes it with code `1008`. `maxPayloadLength`, `backpressureLimit`, and
 `closeOnBackpressureLimit` are Bun options. `drain()` runs after Bun drains
 buffered outbound data.
 
+`onClose(code, reason)` is the disconnect lifecycle hook; it runs before
+`manager.cleanup()`. Close from app code with `this.terminate(code, reason)`
+(default `1000`) or `this.ws.close(...)`. The former `close()` hook is a
+deprecated alias — override `onClose()` in new code.
+
+To reject a full room before the handshake, override `capacityTopics(ctx)` with
+the topics the socket will join. A full topic answers the upgrade with `503`
+instead of opening a socket that cannot subscribe. Topics declared after the
+handshake keep the `subscribe()` throw.
+
 `this.manager` is a per-connection `subManager` backed by the process-wide
 `WSSMAN` singleton. Use it to subscribe to topics, broadcast, inspect members,
 set admin flags, and configure room capacity or payload limits. Broadcast
-results report each topic as `sent`, `backpressured`, `dropped`, or `oversize`.
+results report each topic as `sent`, `backpressured`, `dropped`, or `oversize`;
+`backpressured` is Bun's `-1`-only status and cannot be forced by app code.
 
 For the handshake, frame parsing, lifecycle, and sample chat message contract,
 see [`doc/websockets.md`](doc/websockets.md).
