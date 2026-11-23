@@ -368,25 +368,23 @@ methods return a standard `Response`.
 | `text(body?)`              | `text/plain; charset=utf-8` response.                                                        |
 | `success(code?, data?, message?)` | JSON `{ success: true, ... }` response.                                               |
 | `error(code, message)`     | Error response; records become JSON, strings become `text/plain`.                            |
-| `redirect(url, status?)`   | Empty redirect with `Location`; default status `302`. Accepts any target (see below).         |
-| `redirectLocal(url, status?)` | Redirect only to an origin-relative target; invalid targets answer `400` with no `Location`. |
+| `redirect(url, status?)`   | Safe-by-default redirect to an origin-relative target; unsafe targets answer `400` (see below). |
+| `redirectLocal(url, status?)` | Alias of `redirect`, kept for `0.1.3` callers; same origin-relative validation.            |
+| `redirectExternal(url, status?)` | Redirect to an absolute `http:`/`https:` URL only; other targets answer `400`.          |
 | `file(file, meta?, headers?)` | Send a Bun file or `Uint8Array`. Bun files support byte ranges and return `416` for invalid ranges. |
 | `fileServer()`             | Serve the current request through the configured static file server.                          |
 
 #### Redirect targets
 
-`redirect()` forwards its target verbatim by contract, so handlers that pass
-user input straight through can send a visitor to another origin. Use
-`redirectLocal()` (or check the target with the exported
-`isLocalRedirectTarget()`) whenever the destination can be influenced by a
-request:
+Redirects are safe by default. `redirect()` accepts only origin-relative
+destinations, so a handler can forward request input directly:
 
 ```ts
 import { isLocalRedirectTarget, type ctx } from "rossa";
 
 get({ req, res }: ctx) {
   const next = String(req.query.next ?? "/");
-  return res.redirectLocal(next); // 302 /dashboard, or 400 when not local
+  return res.redirect(next); // 302 /dashboard, or 400 for an off-origin target
 }
 
 // Validate first when you need a custom rejection.
@@ -394,13 +392,37 @@ if (!isLocalRedirectTarget(next)) return res.error(400, "Bad next");
 return res.redirect(next);
 ```
 
-A local target must start with a single `/` and stay origin-relative after
-percent-decoding (up to three passes, covering double/triple-encoded tricks).
-Absolute URLs, protocol-relative targets (`//host`), backslash forms,
-`javascript:`/`data:` schemes, and control characters are rejected. The
-rejection body is `{"success":false,"error":"Invalid redirect target"}`. Plain
-`redirect()` still cannot inject headers: CR/LF/NUL and other control
-characters are stripped from `Location` on the way out.
+`redirect()` rejects anything that could leave the current origin and answers
+`400` with `{"success":false,"error":"Invalid redirect target"}` (no
+`Location`):
+
+- absolute and protocol-relative targets (`https://evil.test`, `//evil.test`);
+- backslash and scheme forms (`\\evil.test`, `javascript:`, `data:`);
+- encoded authorities such as `/%2f%2fevil.test` or `/%252f%252fevil.test`
+  (percent-decoded up to three passes before validation);
+- control characters, empty, and whitespace-only values.
+
+Rooted paths are emitted unchanged (`/account?id=1&tab=prefs`). Safe bare
+relatives are normalized for you: `dashboard` becomes `/dashboard` and `?q=1`
+becomes `/?q=1`. The same normalization backs the exported
+`isLocalRedirectTarget()`, so branching code agrees with the guard.
+`redirectLocal()` is an alias of `redirect()` kept for `0.1.3` callers.
+
+For a deliberate off-origin hop (OAuth authorize URLs, payment providers), say
+so explicitly with `redirectExternal()`. It allows only absolute `http:` or
+`https:` URLs and passes them to `Location` unchanged; protocol-relative,
+scheme (`javascript:`, `data:`), backslash, and relative targets — including
+local paths — still answer the same `400`:
+
+```ts
+return res.redirectExternal(
+  "https://accounts.example.com/oauth/authorize?client_id=app",
+);
+```
+
+CR/LF/NUL and other control characters are stripped from every `Location`
+value on the way out, so a redirect response can never inject additional
+headers.
 
 For SSE, use the `res.event` helpers:
 

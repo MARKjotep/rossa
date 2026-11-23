@@ -45,29 +45,11 @@ const safeHeaders = (input: HeaderObject): HeaderObject => {
 };
 
 /**
- * Returns `true` when `url` is a safe origin-relative redirect target.
- *
- * The target must start with a single `/` and must not become an absolute,
- * protocol-relative, backslash, or scheme target after percent-decoding (up to
- * three times, covering double/triple-encoded authority tricks). Use it before
- * forwarding user input to {@link res.redirect}, or use
- * {@link res.redirectLocal} which applies the same validation.
- *
- * @example
- * ```ts
- * isLocalRedirectTarget("/dashboard");        // true
- * isLocalRedirectTarget("https://evil.test"); // false
- * isLocalRedirectTarget("//evil.test");       // false
- * isLocalRedirectTarget("/%2f%2fevil.test");  // false
- * ```
- *
- * @param url - Candidate redirect target.
- * @returns Whether the target stays on the current origin.
+ * Percent-decodes `value` up to three times so double/triple-encoded
+ * authorities such as `/%252f%252fhost` cannot slip past the checks.
  */
-export function isLocalRedirectTarget(url: string): boolean {
-  if (typeof url !== "string") return false;
-
-  let decoded = url;
+const decodeRedirectTarget = (value: string): string => {
+  let decoded = value;
   for (let pass = 0; pass < 3; pass += 1) {
     if (!decoded.includes("%")) break;
     try {
@@ -77,16 +59,97 @@ export function isLocalRedirectTarget(url: string): boolean {
       break;
     }
   }
+  return decoded;
+};
+
+/** Characters that URL parsers/browsers may treat as separators or ignore. */
+const UNSAFE_REDIRECT_CHARACTERS = /[\u0000-\u001f\u007f\\]/;
+
+/** Matches a leading `<scheme>:` such as `javascript:` or `data:`. */
+const REDIRECT_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * Returns the safe, origin-relative form of `url`, or `null` when the target
+ * could leave the current origin.
+ *
+ * Root-relative targets are returned unchanged. Safe bare relatives are
+ * normalized to a root-relative path, so `dashboard` becomes `/dashboard` and
+ * `?q=1` becomes `/?q=1`; callers can forward them without prefixing first.
+ */
+const normalizeLocalRedirectTarget = (url: string): string | null => {
+  if (typeof url !== "string") return null;
+  // Empty and whitespace-only values are not destinations; surrounding
+  // whitespace is rejected rather than trimmed so the target is unambiguous.
+  if (url.trim() === "" || url !== url.trim()) return null;
+
+  const decoded = decodeRedirectTarget(url);
 
   // Control characters, NUL, and backslashes can confuse URL parsers/browsers.
-  if (/[\u0000-\u001f\u007f\\]/.test(decoded)) return false;
+  if (UNSAFE_REDIRECT_CHARACTERS.test(decoded)) return null;
 
-  // Origin-relative only: no scheme, no external authority.
-  if (!decoded.startsWith("/")) return false;
-  // Protocol-relative (`//host`) and backslash-authority (`/\host`) forms.
-  if (decoded.startsWith("//")) return false;
+  // No scheme (javascript:, data:, http:, …) may survive decoding.
+  if (REDIRECT_SCHEME.test(decoded)) return null;
 
-  return true;
+  if (url.startsWith("/")) {
+    // Protocol-relative (`//host`) and backslash-authority (`/\host`) forms.
+    // A leading slash that only appears after decoding is an encoded-authority
+    // form (`%2F%2Fhost`), handled below.
+    return decoded.startsWith("//") ? null : url;
+  }
+
+  // Encoded-authority form: the leading slash was hidden behind an escape.
+  if (decoded.startsWith("/")) return null;
+
+  return `/${url}`;
+};
+
+/**
+ * Returns `url` when it is an absolute `http:`/`https:` URL, or `null` for
+ * protocol-relative, scheme, backslash, relative, or unparsable targets.
+ */
+const normalizeExternalRedirectTarget = (url: string): string | null => {
+  if (typeof url !== "string") return null;
+  if (url.trim() === "" || url !== url.trim()) return null;
+  if (UNSAFE_REDIRECT_CHARACTERS.test(url)) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Relative and protocol-relative targets have no absolute authority.
+    return null;
+  }
+
+  return parsed.protocol === "http:" || parsed.protocol === "https:"
+    ? url
+    : null;
+};
+
+/**
+ * Returns `true` when `url` is a safe origin-relative redirect target.
+ *
+ * Root-relative targets must not become an absolute, protocol-relative,
+ * backslash, or scheme target after percent-decoding (up to three times,
+ * covering double/triple-encoded authority tricks). Safe bare relatives
+ * (`dashboard`, `?q=1`) are accepted and treated as normalized paths
+ * (`/dashboard`, `/?q=1`), matching {@link res.redirect} and
+ * {@link res.redirectLocal}. Off-origin destinations belong to
+ * {@link res.redirectExternal}.
+ *
+ * @example
+ * ```ts
+ * isLocalRedirectTarget("/dashboard");        // true
+ * isLocalRedirectTarget("dashboard");         // true (normalizes to /dashboard)
+ * isLocalRedirectTarget("https://evil.test"); // false
+ * isLocalRedirectTarget("//evil.test");       // false
+ * isLocalRedirectTarget("/%2f%2fevil.test");  // false
+ * ```
+ *
+ * @param url - Candidate redirect target.
+ * @returns Whether the target stays on the current origin.
+ */
+export function isLocalRedirectTarget(url: string): boolean {
+  return normalizeLocalRedirectTarget(url) !== null;
 }
 
 export interface RespoOptions {
@@ -344,50 +407,104 @@ export class res {
   }
 
   /**
-   * Creates an empty redirect response with a `Location` header.
-   *
-   * The target is used as-is (absolute and external targets are allowed), so
-   * validate untrusted input first with {@link isLocalRedirectTarget} or use
-   * {@link redirectLocal}. CR/LF/NUL and other control characters are removed
-   * from the target so it cannot inject additional headers.
-   *
-   * @param url - Destination URL placed in the `Location` header.
-   * @param status - Redirect status code; defaults to `302`.
+   * Builds the rejection response for an invalid redirect target: `400` with
+   * `{"success":false,"error":"Invalid redirect target"}` and no `Location`.
    */
-  redirect(url: string, status: number = 302): Response {
+  private _invalidRedirect(): Response {
+    for (const name of Object.keys(this._headers)) {
+      if (name.toLowerCase() === "location") delete this._headers[name];
+    }
+    return this.error(400, {
+      success: false,
+      error: "Invalid redirect target",
+    });
+  }
+
+  /** Emits an empty redirect with a sanitized `Location` value. */
+  private _redirectTo(target: string, status: number): Response {
     return new Response(null, {
       status,
       headers: {
-        Location: sanitizeHeaderValue(url),
         ...safeHeaders(this._headers),
+        Location: sanitizeHeaderValue(target),
       },
     });
   }
 
   /**
-   * Redirects only to an origin-relative (`/…`) target.
+   * Creates an empty redirect response to a safe origin-relative target.
    *
-   * Uses {@link isLocalRedirectTarget} to reject absolute URLs,
-   * protocol-relative (`//host`), backslash, scheme (`javascript:`, `data:`),
-   * and encoded-authority targets (decoded up to three times). An invalid
-   * target is answered with `400` and the JSON body
+   * Safe by default: the target is validated with the same rules as
+   * {@link isLocalRedirectTarget}. Absolute (`https://evil.test`),
+   * protocol-relative (`//evil.test`), backslash, scheme (`javascript:`,
+   * `data:`), and encoded-authority (`/%2f%2fevil.test`) targets are rejected
+   * with `400` and the JSON body
    * `{"success":false,"error":"Invalid redirect target"}`; no `Location`
    * header is emitted.
    *
+   * Plain paths are emitted unchanged (`/account?id=1&tab=prefs`), and safe
+   * bare relatives are normalized (`dashboard` → `/dashboard`,
+   * `?q=1` → `/?q=1`), so untrusted input cannot redirect off-origin. Use
+   * {@link redirectExternal} for a deliberate off-origin hop such as an OAuth
+   * authorize URL. CR/LF/NUL and other control characters are removed from the
+   * emitted `Location` value so it cannot inject additional headers.
+   *
+   * @param url - Origin-relative destination, for example `/dashboard`.
+   * @param status - Redirect status code; defaults to `302` (also accepts
+   * `301`, `303`, `307`, `308`).
+   * @returns A redirect response or a `400` JSON error response.
+   *
+   * @example
+   * ```ts
+   * return res.redirect(String(req.query.next ?? "/"));
+   * ```
+   */
+  redirect(url: string, status: number = 302): Response {
+    const target = normalizeLocalRedirectTarget(url);
+    if (target === null) return this._invalidRedirect();
+    return this._redirectTo(target, status);
+  }
+
+  /**
+   * Redirects to an explicit absolute `http:`/`https:` URL (external escape
+   * hatch for OAuth-style flows).
+   *
+   * This is the only method that emits an off-origin `Location`, and only when
+   * the target parses as an absolute `http:` or `https:` URL. Protocol-relative
+   * (`//evil.test`), scheme (`javascript:`, `data:`), backslash, and relative
+   * targets are rejected with `400` and the JSON body
+   * `{"success":false,"error":"Invalid redirect target"}`; no `Location` header
+   * is emitted. Accepted URLs are passed through as-is (no normalization);
+   * control characters are stripped before the header is written.
+   *
+   * @param url - Absolute `http:`/`https:` destination.
+   * @param status - Redirect status code; defaults to `302`.
+   * @returns A redirect response or a `400` JSON error response.
+   *
+   * @example
+   * ```ts
+   * return res.redirectExternal(
+   *   "https://accounts.example.com/oauth/authorize?client_id=app",
+   * );
+   * ```
+   */
+  redirectExternal(url: string, status: number = 302): Response {
+    const target = normalizeExternalRedirectTarget(url);
+    if (target === null) return this._invalidRedirect();
+    return this._redirectTo(target, status);
+  }
+
+  /**
+   * Redirects only to a safe origin-relative target.
+   *
+   * Kept for callers written against `0.1.3`; it is an alias of
+   * {@link redirect}, which now applies the same validation by default.
+   *
    * @param url - Origin-relative destination, for example `/dashboard`.
    * @param status - Redirect status code; defaults to `302`.
-   * @returns A `302` redirect or a `400` JSON error response.
+   * @returns A redirect response or a `400` JSON error response.
    */
   redirectLocal(url: string, status: number = 302): Response {
-    if (!isLocalRedirectTarget(url)) {
-      for (const name of Object.keys(this._headers)) {
-        if (name.toLowerCase() === "location") delete this._headers[name];
-      }
-      return this.error(400, {
-        success: false,
-        error: "Invalid redirect target",
-      });
-    }
     return this.redirect(url, status);
   }
 
