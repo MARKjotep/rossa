@@ -4,7 +4,19 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.4] - 2026-11-23
+
+### ⚠️ Behavior change
+
+- `res.redirect()` is now safe by default. It accepts only origin-relative
+  targets and answers `400 {"success":false,"error":"Invalid redirect target"}`
+  (with no `Location`) for anything off-origin — absolute, protocol-relative,
+  backslash, scheme (`javascript:`, `data:`), or encoded-authority targets.
+  Apps that redirect to external URLs must switch to the new
+  `res.redirectExternal(url, status?)`, which allows only absolute `http:` or
+  `https:` URLs. Bare relatives are normalized (`dashboard` → `/dashboard`,
+  `?q=1` → `/?q=1`); `redirectLocal()` remains as an alias, and
+  `isLocalRedirectTarget()` shares the same logic.
 
 ### Added
 

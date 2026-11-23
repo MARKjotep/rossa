@@ -386,15 +386,18 @@ type HeaderObject = Record<string, string>;
 /**
  * Returns `true` when `url` is a safe origin-relative redirect target.
  *
- * The target must start with a single `/` and must not become an absolute,
- * protocol-relative, backslash, or scheme target after percent-decoding (up to
- * three times, covering double/triple-encoded authority tricks). Use it before
- * forwarding user input to {@link res.redirect}, or use
- * {@link res.redirectLocal} which applies the same validation.
+ * Root-relative targets must not become an absolute, protocol-relative,
+ * backslash, or scheme target after percent-decoding (up to three times,
+ * covering double/triple-encoded authority tricks). Safe bare relatives
+ * (`dashboard`, `?q=1`) are accepted and treated as normalized paths
+ * (`/dashboard`, `/?q=1`), matching {@link res.redirect} and
+ * {@link res.redirectLocal}. Off-origin destinations belong to
+ * {@link res.redirectExternal}.
  *
  * @example
  * ```ts
  * isLocalRedirectTarget("/dashboard");        // true
+ * isLocalRedirectTarget("dashboard");         // true (normalizes to /dashboard)
  * isLocalRedirectTarget("https://evil.test"); // false
  * isLocalRedirectTarget("//evil.test");       // false
  * isLocalRedirectTarget("/%2f%2fevil.test");  // false
@@ -545,30 +548,74 @@ declare class res {
      */
     success(code?: number, data?: any, message?: string): Response;
     /**
-     * Creates an empty redirect response with a `Location` header.
-     *
-     * The target is used as-is (absolute and external targets are allowed), so
-     * validate untrusted input first with {@link isLocalRedirectTarget} or use
-     * {@link redirectLocal}. CR/LF/NUL and other control characters are removed
-     * from the target so it cannot inject additional headers.
-     *
-     * @param url - Destination URL placed in the `Location` header.
-     * @param status - Redirect status code; defaults to `302`.
+     * Builds the rejection response for an invalid redirect target: `400` with
+     * `{"success":false,"error":"Invalid redirect target"}` and no `Location`.
      */
-    redirect(url: string, status?: number): Response;
+    private _invalidRedirect;
+    /** Emits an empty redirect with a sanitized `Location` value. */
+    private _redirectTo;
     /**
-     * Redirects only to an origin-relative (`/…`) target.
+     * Creates an empty redirect response to a safe origin-relative target.
      *
-     * Uses {@link isLocalRedirectTarget} to reject absolute URLs,
-     * protocol-relative (`//host`), backslash, scheme (`javascript:`, `data:`),
-     * and encoded-authority targets (decoded up to three times). An invalid
-     * target is answered with `400` and the JSON body
+     * Safe by default: the target is validated with the same rules as
+     * {@link isLocalRedirectTarget}. Absolute (`https://evil.test`),
+     * protocol-relative (`//evil.test`), backslash, scheme (`javascript:`,
+     * `data:`), and encoded-authority (`/%2f%2fevil.test`) targets are rejected
+     * with `400` and the JSON body
      * `{"success":false,"error":"Invalid redirect target"}`; no `Location`
      * header is emitted.
      *
+     * Plain paths are emitted unchanged (`/account?id=1&tab=prefs`), and safe
+     * bare relatives are normalized (`dashboard` → `/dashboard`,
+     * `?q=1` → `/?q=1`), so untrusted input cannot redirect off-origin. Use
+     * {@link redirectExternal} for a deliberate off-origin hop such as an OAuth
+     * authorize URL. CR/LF/NUL and other control characters are removed from the
+     * emitted `Location` value so it cannot inject additional headers.
+     *
+     * @param url - Origin-relative destination, for example `/dashboard`.
+     * @param status - Redirect status code; defaults to `302` (also accepts
+     * `301`, `303`, `307`, `308`).
+     * @returns A redirect response or a `400` JSON error response.
+     *
+     * @example
+     * ```ts
+     * return res.redirect(String(req.query.next ?? "/"));
+     * ```
+     */
+    redirect(url: string, status?: number): Response;
+    /**
+     * Redirects to an explicit absolute `http:`/`https:` URL (external escape
+     * hatch for OAuth-style flows).
+     *
+     * This is the only method that emits an off-origin `Location`, and only when
+     * the target parses as an absolute `http:` or `https:` URL. Protocol-relative
+     * (`//evil.test`), scheme (`javascript:`, `data:`), backslash, and relative
+     * targets are rejected with `400` and the JSON body
+     * `{"success":false,"error":"Invalid redirect target"}`; no `Location` header
+     * is emitted. Accepted URLs are passed through as-is (no normalization);
+     * control characters are stripped before the header is written.
+     *
+     * @param url - Absolute `http:`/`https:` destination.
+     * @param status - Redirect status code; defaults to `302`.
+     * @returns A redirect response or a `400` JSON error response.
+     *
+     * @example
+     * ```ts
+     * return res.redirectExternal(
+     *   "https://accounts.example.com/oauth/authorize?client_id=app",
+     * );
+     * ```
+     */
+    redirectExternal(url: string, status?: number): Response;
+    /**
+     * Redirects only to a safe origin-relative target.
+     *
+     * Kept for callers written against `0.1.3`; it is an alias of
+     * {@link redirect}, which now applies the same validation by default.
+     *
      * @param url - Origin-relative destination, for example `/dashboard`.
      * @param status - Redirect status code; defaults to `302`.
-     * @returns A `302` redirect or a `400` JSON error response.
+     * @returns A redirect response or a `400` JSON error response.
      */
     redirectLocal(url: string, status?: number): Response;
     /**
@@ -1285,6 +1332,84 @@ declare const sqliteDialect: DbDialectAdapter;
 
 declare const mysqlDialect: DbDialectAdapter;
 declare const mariadbDialect: DbDialectAdapter;
+
+/** Journal mode requested for a SQLite connection. In-memory databases stay in "memory" mode. */
+type SqliteJournalMode = "WAL" | "DELETE" | "TRUNCATE" | "PERSIST" | "MEMORY" | "OFF";
+/** Durability level for committed transactions. "NORMAL" is the usual companion to WAL. */
+type SqliteSynchronous = "FULL" | "NORMAL" | "OFF";
+/** Where SQLite keeps temporary tables and sort spills. */
+type SqliteTempStore = "MEMORY" | "FILE" | "DEFAULT";
+/** Setup options applied by `configureSqlite` / `createSqliteDatabase`. */
+interface SqliteConfigOptions {
+    /** Journal mode to request. Default "WAL". In-memory databases always report "memory". */
+    journalMode?: SqliteJournalMode;
+    /** Durability level. Default "NORMAL" (safe with WAL; loses only the last commits on power loss). Use "FULL" for maximum durability. Never "OFF". */
+    synchronous?: SqliteSynchronous;
+    /** Milliseconds a connection waits on a locked database before failing. Default 5000. */
+    busyTimeoutMs?: number;
+    /** Enforce declared foreign keys. Default true. */
+    foreignKeys?: boolean;
+    /** Per-connection page cache. Negative = KiB budget (default -32000 ≈ 31.25 MiB), positive = pages. Nonzero integer. */
+    cacheSizeKiB?: number;
+    /** Optional temp store. Undefined = leave SQLite default (benchmark before enabling MEMORY). */
+    tempStore?: SqliteTempStore;
+}
+/** Effective SQLite settings read back after configuration. */
+interface SqliteConnectionInfo {
+    /** Effective journal mode as SQLite reports it (lowercase, e.g. "wal"). */
+    journalMode: string;
+    /** Effective `synchronous` value: 0 = OFF, 1 = NORMAL, 2 = FULL, 3 = EXTRA. */
+    synchronous: number;
+    /** Effective busy timeout in milliseconds. */
+    busyTimeoutMs: number;
+    /** Whether declared foreign keys are enforced. */
+    foreignKeys: boolean;
+    /** Configured page-cache setting (negative = KiB budget, positive = pages). */
+    cacheSizeKiB: number;
+    /** Database page size in bytes. */
+    pageSize: number;
+    /** Current number of database pages. */
+    pageCount: number;
+}
+/** An open SQLite connection returned by `createSqliteDatabase`. */
+interface SqliteConnection {
+    /** The Bun SQL client connected to this database. */
+    db: SQL;
+    /** Absolute database path, or ":memory:" for in-memory databases. */
+    filename: string;
+    /** Effective settings read back during setup. */
+    info: SqliteConnectionInfo;
+    /** Close the underlying connection. */
+    close(): Promise<void>;
+}
+/**
+ * Apply SQLite PRAGMAs to an existing connection and report the effective
+ * values. WAL, NORMAL durability, foreign keys, and a busy timeout make a
+ * connection suitable for a typical local application database.
+ */
+declare function configureSqlite(db: SQL, options?: SqliteConfigOptions): Promise<SqliteConnectionInfo>;
+/**
+ * Open a SQLite database through Bun SQL, creating its parent directory, and
+ * apply the recommended PRAGMAs. Pass ":memory:" for a throwaway database.
+ */
+declare function createSqliteDatabase(filename: string, options?: SqliteConfigOptions): Promise<SqliteConnection>;
+/**
+ * Run SQLite's integrity check and report whether the database is healthy.
+ * Corruption details are returned in `messages`.
+ */
+declare function sqliteIntegrityCheck(db: SQL): Promise<{
+    ok: boolean;
+    messages: string[];
+}>;
+/**
+ * Checkpoint the write-ahead log, flushing WAL pages back into the main
+ * database file. "PASSIVE" never blocks ongoing readers or writers.
+ */
+declare function sqliteWalCheckpoint(db: SQL, mode?: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE"): Promise<{
+    busy: number;
+    log: number;
+    checkpointed: number;
+}>;
 
 declare function use(...middlewares: GuardReturnType[]): <TTarget, TCtx extends ClassDecoratorContext<any> | ClassMethodDecoratorContext<any, any>>(target: TTarget, context: TCtx) => void | TTarget;
 
@@ -2596,5 +2721,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, contentType, cookies, cors, createGuard, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, isLocalRedirectTarget, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
-export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, MultipartOptions, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, configureSqlite, contentType, cookies, cors, createGuard, createSqliteDatabase, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, isLocalRedirectTarget, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, sqliteIntegrityCheck, sqliteWalCheckpoint, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
+export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, MultipartOptions, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, SqliteConfigOptions, SqliteConnection, SqliteConnectionInfo, SqliteJournalMode, SqliteSynchronous, SqliteTempStore, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
