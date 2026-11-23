@@ -3,6 +3,28 @@
 Rossa's database layer provides typed schemas and a repository API over Bun's
 SQL client. SQLite works without an additional driver dependency.
 
+## SQLite setup
+
+`createSqliteDatabase()` opens Bun SQL on a SQLite file, creates missing parent
+directories, and applies safe defaults (WAL journal, `NORMAL` durability,
+foreign keys on, 5 s busy timeout):
+
+```ts
+import { createSqliteDatabase } from "@/db";
+
+const { db, info, close } = await createSqliteDatabase("data/app.db");
+console.log(info.journalMode); // "wal"
+// ...use db with DbRepository or raw Bun SQL...
+await close();
+```
+
+For a connection you already own, `configureSqlite(db)` applies the same
+PRAGMAs and returns the effective settings. `NORMAL` synchronous is safe with
+WAL but can lose the last commits on power loss; choose `{ synchronous: "FULL" }`
+when that tradeoff is unacceptable. `sqliteWalCheckpoint(db)` flushes the WAL
+back into the main file, and `sqliteIntegrityCheck(db)` reports corruption
+details.
+
 `DbRepository<T>` contains shared CRUD and transaction behavior. A
 `DbDialectAdapter` supplies database-specific column types, DDL, upsert,
 inspection, truncation, and optimization. See the

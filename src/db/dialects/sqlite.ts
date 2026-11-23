@@ -8,6 +8,19 @@ function tableFragment(schema: DbSchema<any>) {
   return sql.unsafe(quoteTable(schema.table));
 }
 
+const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < SIZE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(2)} ${SIZE_UNITS[unit]}`;
+}
+
 function joinSql(fragments: any[]) {
   return fragments.reduce((left, right, index) =>
     index === 0 ? right : sql`${left}, ${right}`,
@@ -162,9 +175,17 @@ export const sqliteDialect: DbDialectAdapter = {
     const indices = await db`${sql.unsafe(
       `PRAGMA ${pragmaDatabase}index_list(${quoteIdentifier(table)})`,
     )}`;
+    const [pageCount] = await db<{ page_count: number }[]>`
+      ${sql.unsafe("PRAGMA page_count")}
+    `;
+    const [pageSize] = await db<{ page_size: number }[]>`
+      ${sql.unsafe("PRAGMA page_size")}
+    `;
     return {
       rowCount: Number(count?.total ?? 0),
-      diskSize: "N/A (SQLite file-level)",
+      diskSize: formatBytes(
+        Number(pageCount?.page_count ?? 0) * Number(pageSize?.page_size ?? 0),
+      ),
       indexCount: indices.length,
     };
   },
@@ -189,6 +210,7 @@ export const sqliteDialect: DbDialectAdapter = {
     `;
   },
   async optimize(db) {
+    await db`${sql.unsafe("PRAGMA optimize")}`;
     await db`${sql.unsafe("VACUUM")}`;
   },
 };

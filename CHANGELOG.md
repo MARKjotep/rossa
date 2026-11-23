@@ -4,6 +4,22 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `createSqliteDatabase()`, `configureSqlite()`, `sqliteIntegrityCheck()`, and
+  `sqliteWalCheckpoint()` in the database module. They open a Bun SQL SQLite
+  connection with WAL, `synchronous=NORMAL`, foreign keys, and a busy timeout,
+  and expose the effective settings.
+
+### Changed
+
+- SQLite `optimize()` now also runs `PRAGMA optimize` before `VACUUM` to keep
+  query-planner statistics current.
+- SQLite `getTableStats()` reports real database size (page count × page size,
+  formatted for humans) instead of `"N/A (SQLite file-level)"`.
+
 ## [0.1.3] - 2026-11-23
 
 ### Fixed

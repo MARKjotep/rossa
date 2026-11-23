@@ -11,6 +11,18 @@ export { getDialect } from "./dialects/registry";
 export { postgresDialect } from "./dialects/postgres";
 export { sqliteDialect } from "./dialects/sqlite";
 export { mariadbDialect, mysqlDialect } from "./dialects/mysql";
+export {
+  configureSqlite,
+  createSqliteDatabase,
+  sqliteIntegrityCheck,
+  sqliteWalCheckpoint,
+  type SqliteConfigOptions,
+  type SqliteConnection,
+  type SqliteConnectionInfo,
+  type SqliteJournalMode,
+  type SqliteSynchronous,
+  type SqliteTempStore,
+} from "./dialects/sqlite-config";
 export type {
   DbDialectAdapter,
   DbDialectName,
