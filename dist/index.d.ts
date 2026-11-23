@@ -2,6 +2,25 @@ import { Server, SocketAddress, BunFile, ServerWebSocket, WebSocketHandler, SQL 
 import { McpServer, McpRequestContext } from '@modelcontextprotocol/server';
 export { McpRequestContext, McpServer } from '@modelcontextprotocol/server';
 
+/** Options accepted by {@link req.autoBody}. */
+interface AutoBodyOptions {
+    /**
+     * Maximum accepted request-body size in bytes.
+     *
+     * @default 1048576 (1 MiB, the shared `DEFAULT_MAX_SIZE`)
+     */
+    maxSize?: number;
+}
+/** Content-type-aware body selected by {@link req.autoBody}. */
+interface AutoBodyResult<T = unknown> {
+    /**
+     * Parsed body: an object/array for JSON, `FormData` for form content types,
+     * or the raw string for anything else. `null` when the request had no body.
+     */
+    body: T | string | null;
+    /** How the body was interpreted. */
+    parsedWith: "json" | "form" | "text" | "empty";
+}
 declare class req {
     readonly request: Request;
     readonly server?: Server<unknown> | undefined;
@@ -13,6 +32,7 @@ declare class req {
     private _formData?;
     private _json?;
     private _txt?;
+    private _autoBody?;
     constructor(request: Request, server?: Server<unknown> | undefined, fileDetector?: (path: string) => boolean);
     /**
      * Caches the raw text.
@@ -28,6 +48,28 @@ declare class req {
      * Parses FormData. Cannot be mixed with .text() or .json() for multipart binary uploads.
      */
     form(): Promise<FormData>;
+    /**
+     * Reads the request body using its `Content-Type`.
+     *
+     * - `application/json` (and `+json`) is parsed with `JSON.parse`; malformed
+     *   JSON falls back to the raw text instead of throwing.
+     * - Form content types return the cached `FormData`.
+     * - Everything else returns the raw text.
+     * - An empty body returns `body: null` and `parsedWith: "empty"`.
+     *
+     * The result is cached like {@link req.text}, so repeated calls do not re-read
+     * the stream, and bodies larger than 1 MiB are rejected with an error instead
+     * of being parsed. This makes it safe for lenient endpoints that accept
+     * either JSON or form input:
+     *
+     * ```ts
+     * const { body, parsedWith } = await req.autoBody();
+     * ```
+     *
+     * @param options - Optional body-size cap.
+     * @returns The selected body and how it was interpreted.
+     */
+    autoBody<T = unknown>(options?: AutoBodyOptions): Promise<AutoBodyResult<T>>;
     get url(): URL;
     get query(): Record<string, string>;
     get cookies(): Map<string, string>;
@@ -292,6 +334,36 @@ declare class ServerSide<TData extends Record<string, any> = Record<string, any>
      * without a session service (for example a hand-built `new ServerSide()`).
      */
     rotate(): Promise<void>;
+    /**
+     * Rotates the session identifier and atomically replaces all session data.
+     *
+     * Use this after a successful login so no pre-authentication value survives:
+     *
+     * ```ts
+     * await ctx.session!.reset({ userId: user.id, username: user.name });
+     * ```
+     *
+     * The previous row is deleted and a fresh `sid` is issued, so the old cookie
+     * is no longer usable. The guard persists the new row and sends its cookie
+     * after the handler returns. Pass an empty object to end with no data (the
+     * guard then deletes the new row and expires the cookie).
+     *
+     * A readonly mount ignores the reset.
+     *
+     * @param data - Complete replacement for the session data.
+     */
+    reset(data?: Partial<TData>): Promise<void>;
+    /**
+     * Removes every key from the session.
+     *
+     * After the handler returns the guard deletes the stored row and expires the
+     * cookie, so the client is logged out. A readonly mount ignores the clear.
+     *
+     * ```ts
+     * await ctx.session!.clear();
+     * ```
+     */
+    clear(): Promise<void>;
 }
 
 declare class ctx<Args extends Record<string, string> = Record<string, string>, SessionType = ServerSide, BodyType = unknown> {
@@ -424,6 +496,7 @@ declare class res {
     private readonly server?;
     private _code;
     private _headers;
+    private _cookies;
     private _encoding?;
     /**
      * Creates a response builder for the current request.
@@ -500,6 +573,44 @@ declare class res {
      * @returns This response builder for chaining.
      */
     header(input: Heder | HeaderObject): this;
+    /**
+     * Appends a cookie to the response.
+     *
+     * Each call adds one independent `Set-Cookie` header, so multiple cookies are
+     * preserved and never merged into a single value. Serialization uses the same
+     * builder as {@link Heder.cookie} and the resulting value is sanitized like
+     * every other header, preventing CR/LF injection.
+     *
+     * ```ts
+     * res.setCookie("csrf_token", token, { path: "/", httpOnly: false, sameSite: "Lax" });
+     * ```
+     *
+     * @param name - Cookie name.
+     * @param value - Cookie value; use `clearCookie` to expire one.
+     * @param options - Flags and lifetime. `Path` defaults to `/`.
+     * @returns This response builder for chaining.
+     */
+    setCookie(name: string, value: string, options?: CookieOptions): this;
+    /**
+     * Expires a cookie with `Max-Age=0` and an epoch `Expires` date.
+     *
+     * The `Path` and `Domain` (when supplied) must match the original cookie so
+     * the browser removes the same entry.
+     *
+     * ```ts
+     * res.clearCookie("csrf_token", { path: "/" });
+     * ```
+     *
+     * @param name - Cookie name.
+     * @param options - Flags matching the original cookie. `Path` defaults to `/`.
+     * @returns This response builder for chaining.
+     */
+    clearCookie(name: string, options?: CookieOptions): this;
+    /**
+     * Builds the response header set, appending every queued `Set-Cookie`
+     * separately so multiple cookies survive the trip to `Response#headers`.
+     */
+    private _buildHeaders;
     private _assemble;
     /**
      * Creates a response with no body using the supplied status or current status.
@@ -796,6 +907,41 @@ interface TopicPublishResult {
     topic: string;
     status: TopicPublishStatus;
 }
+/** Options for {@link subManager.broadcast} / {@link WssManager.broadcastToTopics}. */
+interface TopicBroadcastOptions {
+    /**
+     * Also deliver the frame to the publishing socket. Bun's `publish()`
+     * excludes the publisher, so this sends one copy through `ws.send()` before
+     * fanning out. Defaults to `false` (sender-exclusive, today's behavior).
+     * When every target topic rejects the payload as oversize, the sender gets
+     * no copy either.
+     */
+    includeSelf?: boolean;
+}
+/** One member of a WebSocket topic, as returned by `members()`/presence frames. */
+interface TopicMember {
+    /** Connection id assigned by `WSSMAN.register`. */
+    id: string;
+    /** Registration nickname, falling back to the identity's `nickname` and then `""`. */
+    nickname: string;
+    /** Identity id from the guard (`contextData.user`/`chatUser`/`principal`). */
+    userId?: string;
+}
+/** Topic presence event names emitted when `WssConfig.presence` is enabled. */
+type TopicPresenceEvent = "join" | "leave";
+/**
+ * Automatic presence frame: `{ type, topic, member, members }`.
+ *
+ * `member` is the socket that joined or left; `members` is the topic's member
+ * list after the change (the joining socket included on `join`, the departed
+ * socket excluded on `leave`).
+ */
+interface TopicPresenceFrame {
+    type: TopicPresenceEvent;
+    topic: string;
+    member: TopicMember;
+    members: TopicMember[];
+}
 declare class subManager {
     private ws;
     id: string;
@@ -808,13 +954,19 @@ declare class subManager {
     isAdmin(topic: string): boolean;
     isSubscribed(topic: string): boolean;
     setTopicConfig(topic: string, config?: WssConfig): void;
+    /** Typed member list for a topic; see {@link WssManager.members}. */
+    members(topic: string): TopicMember[];
     /**
      * Publishes to unique topics and returns Bun's outcome for each topic.
+     *
+     * Pass `{ includeSelf: true }` to also deliver the frame to this socket
+     * (Bun's `publish()` otherwise excludes the publisher). The default is
+     * sender-exclusive, matching the historical behavior and result shape.
      *
      * `backpressured` is Bun-internal (a peer past the outbound drain threshold)
      * and cannot be produced from application code; see `TopicPublishResult`.
      */
-    broadcast(topics: string[], data: any): TopicPublishResult[];
+    broadcast(topics: string[], data: any, options?: TopicBroadcastOptions): TopicPublishResult[];
 }
 declare class WssManager {
     private connections;
@@ -822,21 +974,26 @@ declare class WssManager {
     private topicRegistry;
     private memberTopics;
     private roomAdmins;
+    /** Last queued history write per topic; replay awaits it before reading. */
+    private historySaves;
     private defaultTopicConfig;
     /** 1. Lifecycle: Register/Unregister Connections */
     register(ws: ServerWebSocket<any>, nickname?: string): string;
-    getMemberDetails(topic: string): {
-        id: string;
-        userId: any;
-        nickname: any;
-    }[];
+    /**
+     * Typed member list for a topic.
+     *
+     * Returns `{ id, nickname, userId? }` for every live connection subscribed
+     * to `topic`, in join order. `nickname` is the registration nickname (or the
+     * identity's nickname, or `""`); `userId` is the guard identity's id when it
+     * attached one (otherwise the property is absent).
+     */
+    members(topic: string): TopicMember[];
+    /** @deprecated Use {@link members}; kept for existing call sites. */
+    getMemberDetails(topic: string): TopicMember[];
+    private memberDetails;
     /** Get all topics a specific user is currently in */
     getUserTopics(id: string): string[];
-    get(topic: string): {
-        id: string;
-        userId: any;
-        nickname: any;
-    }[];
+    get(topic: string): TopicMember[];
     unregister(id: string): void;
     /** 2. Subscription Management */
     subscribe(id: string, topic: string): void;
@@ -857,6 +1014,19 @@ declare class WssManager {
     /** Helper to get the correct config for any topic */
     private getConfigForTopic;
     setTopicConfig(topic: string, config?: WssConfig): void;
+    private presenceFor;
+    /**
+     * Emits one presence frame when the topic opted in.
+     *
+     * Delivery works around Bun's sender-exclusive `publish()`: for a join the
+     * publishing socket is the new member, so it receives a direct copy after
+     * the fan-out. For a leave the publisher is a remaining member, which also
+     * needs the direct copy. Without presence config nothing is sent.
+     */
+    private emitPresence;
+    private scheduleHistoryReplay;
+    private replayHistory;
+    private persistHistoryFrame;
     /** Broadcast to an array of topics */
     /**
      * Publishes an encoded payload to each unique topic within that topic's
@@ -867,13 +1037,84 @@ declare class WssManager {
      * `backpressured` is Bun-internal (a peer past the outbound drain threshold);
      * in-process app code cannot force it and no application branch or unit test
      * should depend on it.
+     *
+     * With `options.includeSelf`, the publishing socket also receives one copy
+     * (`ws.send`) before the fan-out, unless every topic rejects the payload as
+     * oversize. The returned `TopicPublishResult[]` describes the publish
+     * outcomes only and is unchanged by the option.
+     *
+     * When the topic config has `history`, accepted frames are queued for
+     * persistence in `broadcast()` order.
      */
-    broadcastToTopics(ws: ServerWebSocket<any>, topics: string[], data: unknown): TopicPublishResult[];
+    broadcastToTopics(ws: ServerWebSocket<any>, topics: string[], data: unknown, options?: TopicBroadcastOptions): TopicPublishResult[];
     /** Ensures all topics for a client are cleaned up on disconnect */
     cleanup(id: string): void;
 }
 
 declare const WSSMAN: WssManager;
+/** Default number of stored frames replayed when a topic does not set `limit`. */
+declare const DEFAULT_TOPIC_HISTORY_LIMIT = 50;
+/**
+ * Persistence adapter for {@link WssHistoryConfig}.
+ *
+ * The application owns the frame shape: whatever object or string it passes to
+ * `broadcast()` is what Rossa hands to `save()` and, later, replays exactly as
+ * `recent()` returned it.
+ */
+interface TopicHistoryStore {
+    /**
+     * Persists one accepted broadcast frame for a topic.
+     *
+     * Called after the frame passed the topic's payload-size check and the
+     * optional `persist` filter. Return a promise to make writes asynchronous;
+     * Rossa orders subsequent saves per topic and waits for them before replay.
+     */
+    save(topic: string, frame: unknown): Promise<void> | void;
+    /**
+     * Returns up to `limit` stored frames for a topic, **oldest → newest**.
+     * Rossa sends them in the returned order on join (subject to `replay`).
+     */
+    recent(topic: string, limit: number): Promise<unknown[]>;
+}
+/**
+ * Pluggable per-topic history/backlog.
+ *
+ * When configured, Rossa saves accepted broadcast frames (after the payload
+ * check and the optional `persist` filter) and, by default, replays
+ * `recent(topic, limit)` oldest → newest to a socket when it joins the topic.
+ * Presence frames and replayed frames are never persisted.
+ */
+interface WssHistoryConfig {
+    /** Persistence adapter that stores and later reads frames. */
+    store: TopicHistoryStore;
+    /**
+     * Maximum number of frames requested from `store.recent()` on join.
+     * Defaults to {@link DEFAULT_TOPIC_HISTORY_LIMIT} (`50`).
+     */
+    limit?: number;
+    /**
+     * Replay stored frames to a socket when it joins the topic. Defaults to
+     * `true`; set `false` to persist without replaying.
+     */
+    replay?: boolean;
+    /**
+     * Filter deciding which accepted frames are persisted. Receives the frame
+     * exactly as passed to `broadcast()`. Defaults to persisting every accepted
+     * frame; returning `false` skips the frame.
+     */
+    persist?: (frame: unknown) => boolean;
+}
+/**
+ * Per-topic presence frame switches.
+ *
+ * An object opts in to both event kinds; set a key to `false` to suppress it.
+ */
+interface WssPresenceOptions {
+    /** Emit a `join` frame when a socket subscribes. Defaults to `true`. */
+    join?: boolean;
+    /** Emit a `leave` frame when a socket unsubscribes/cleans up. Defaults to `true`. */
+    leave?: boolean;
+}
 interface WssConfig {
     /**
      * Maximum members in this topic. Checked before the HTTP upgrade for topics
@@ -883,6 +1124,26 @@ interface WssConfig {
     maxClients?: number;
     /** Maximum broadcast payload bytes for this topic. */
     maxPayloadSize?: number;
+    /**
+     * Emit automatic `{ type: "join" | "leave", topic, member, members }`
+     * presence frames for this topic. `true` enables both events;
+     * `{ join?, leave? }` enables either selectively.
+     *
+     * Defaults to **off**: a topic without this option emits no extra frames, so
+     * existing broadcasts and handshakes are byte-identical. Join frames are
+     * delivered to the joining socket as well as the other members; leave frames
+     * go to the remaining members after the departed socket is removed.
+     */
+    presence?: boolean | WssPresenceOptions;
+    /**
+     * Pluggable topic history/backlog. Accepted broadcast frames are saved
+     * through `store` (subject to `persist`) and, unless `replay` is `false`,
+     * replayed oldest → newest to joining sockets. Frames are replayed exactly
+     * as `recent()` returned them, with `replay: true` **not** injected.
+     *
+     * Defaults to undefined: no persistence and no replay.
+     */
+    history?: WssHistoryConfig;
 }
 /** Fixed-window incoming message limit applied independently to each socket. */
 interface WssMessageRateLimit {
@@ -897,12 +1158,52 @@ type wssMessage<T extends Record<string, any> = Record<string, any>> = {
     topic?: string | undefined;
 };
 
-declare class Websocket<T extends Record<string, any> = Record<string, any>> {
-    ws: ServerWebSocket<{}>;
+/**
+ * Data Bun keeps on a WebSocket connection after `WSSMAN.register` runs.
+ *
+ * `id` and `nickname` are added by registration, while `instance` and
+ * `contextData` come from the router's upgrade payload. `contextData` is the
+ * same object a guard populated as `ctx.data` before the handshake.
+ */
+interface WssSocketData {
+    /** Connection id assigned by `WSSMAN.register`. */
+    id: string;
+    /** Display name passed to `WSSMAN.register` (usually the guard identity's nickname). */
+    nickname?: string;
+    /** Guard-populated `ctx.data` copied before the upgrade. */
+    contextData?: Record<string, any>;
+    /** Controller instance bound to this connection. */
+    instance?: Websocket<any, any>;
+}
+/**
+ * Base class for WebSocket controllers.
+ *
+ * @typeParam TData - Per-connection state stored on `this.data`.
+ * @typeParam TIdentity - Guard-populated identity exposed as `this.user`
+ * (resolved from `contextData.user`, `contextData.chatUser`,
+ * `contextData.principal`, or `ws.data.user`). Defaults to
+ * `Record<string, any>`, so untyped use keeps working.
+ */
+declare class Websocket<TData extends Record<string, any> = Record<string, any>, TIdentity = Record<string, any>> {
+    ws: ServerWebSocket<WssSocketData>;
     manager: subManager;
     /** Data populated by WebSocket route guards before the connection upgrades. */
     contextData: Record<string, any>;
-    data: T;
+    data: TData;
+    /**
+     * Guard-populated identity resolved from the upgrade's `contextData`
+     * (`user`, `chatUser`, or `principal`) or `ws.data.user`. Empty object when
+     * no guard attached one. Available from `open()` onwards.
+     */
+    user: TIdentity;
+    /**
+     * Query string of the WebSocket handshake URL (for example
+     * `/chat?room=lobby` → `room=lobby`). Captured by the default
+     * {@link capacityTopics} implementation, so subclasses that override
+     * `capacityTopics` should call `super.capacityTopics(ctx)` to keep it
+     * populated.
+     */
+    query: URLSearchParams;
     constructor();
     /**
      * Topics whose `maxClients` should be checked before the HTTP upgrade.
@@ -917,11 +1218,15 @@ declare class Websocket<T extends Record<string, any> = Record<string, any>> {
      * handshake. In that case `subManager.subscribe()` still enforces
      * `maxClients` and throws `TopicCapacityError`.
      *
+     * The default implementation also snapshots `ctx.url.searchParams` into
+     * {@link query}; when you override it, call `super.capacityTopics(ctx)` if
+     * you rely on `this.query`.
+     *
      * Configure the topic's `maxClients` before the upgrade (module scope, a
      * guard, or `WSSMAN.setTopicConfig`) — `open()` has not run yet when this is
      * called.
      */
-    capacityTopics(_ctx: ctx): string[];
+    capacityTopics(ctx: ctx): string[];
     open(): Promise<void> | void;
     message({ text, json, topic }: wssMessage): Promise<void> | void;
     /** Called when Bun has drained buffered outbound data for this connection. */
@@ -962,7 +1267,7 @@ declare function route(basePath?: string): <TTarget extends abstract new (...arg
  * @param basePath - /url/:hello
  * @returns
  */
-declare function wss(basePath?: string): <TTarget extends abstract new (...args: any[]) => Websocket<Record<string, any>>>(target: TTarget, context: ClassDecoratorContext<any>) => void | TTarget;
+declare function wss(basePath?: string): <TTarget extends abstract new (...args: any[]) => Websocket<Record<string, any>, Record<string, any>>>(target: TTarget, context: ClassDecoratorContext<any>) => void | TTarget;
 
 type GuardFactoryHandler<TOptions = void, ExtraCfg = Record<string, any>> = (ctx: ctx, next: () => Promise<Response> | Response, options: TOptions, Config: ErrorConfig & ExtraCfg) => Promise<Response>;
 type GuardConfig = ErrorConfig & {
@@ -1076,9 +1381,16 @@ type McpServerFactory = (context: McpRequestContext) => McpServer | Promise<McpS
 interface McpOptions {
     /**
      * Allowed browser `Origin` values. Entries may be full origins
-     * (`https://app.example.com`), hostnames (`app.example.com`), or the SDK's
-     * extension form (`moz-extension://*`). Full origins are matched exactly
-     * (scheme, host, and port); hostnames are matched port-agnostically.
+     * (`https://app.example.com`), plain hostnames (`app.example.com`), or
+     * scheme wildcards (`https://*`, `http://*`, `moz-extension://*`). Full
+     * origins are matched exactly (scheme, host, and port); hostnames are
+     * matched port-agnostically, in either scheme.
+     *
+     * A scheme wildcard allows every origin that uses that scheme: `https://*`
+     * admits any https origin but not http, and `http://*` the reverse. Rossa
+     * matches the `http`/`https` forms itself because the underlying MCP SDK
+     * wildcard rule only covers non-web schemes; extension wildcards such as
+     * `moz-extension://*` are validated by the SDK as before.
      *
      * Requests without an `Origin` header always pass, as non-browser MCP
      * clients do not send one. When omitted, Origin validation is disabled;
@@ -1197,6 +1509,7 @@ declare class Column {
     primaryKey: boolean;
     required: boolean;
     isUnique: boolean;
+    isAutoIncrement: boolean;
     hasDefault: boolean;
     defaultIsCurrentTimestamp: boolean;
     defaultValue: string | number | boolean | null;
@@ -1204,6 +1517,14 @@ declare class Column {
     get primary(): this;
     get notNull(): this;
     get unique(): this;
+    /**
+     * Request a database-generated, never-reused value for this column.
+     *
+     * SQLite emits `PRIMARY KEY AUTOINCREMENT` (the column must be the primary
+     * key); PostgreSQL renders `GENERATED BY DEFAULT AS IDENTITY` for plain
+     * integer columns (`SERIAL` already increments); MySQL adds `AUTO_INCREMENT`.
+     */
+    autoIncrement(): this;
     get defaultNow(): this;
     default(value: string | number | boolean): this;
 }
@@ -1245,6 +1566,10 @@ interface DbDialectAdapter {
     normalizeOperator(operator: string): string;
     version(db: SQL): Promise<string>;
     createTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+    /** Render an (ideally idempotent) `CREATE INDEX` statement for a schema index. */
+    createIndexSQL(table: string, index: DbSchemaIndex): string;
+    /** Apply one schema index, skipping it when it already exists. */
+    createIndex(db: SQL, schema: DbSchema<any>, index: DbSchemaIndex): Promise<void>;
     getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]>;
     addColumn(db: SQL, schema: DbSchema<any>, name: string, type: string): Promise<void>;
     dropColumn(db: SQL, schema: DbSchema<any>, name: string): Promise<void>;
@@ -1259,13 +1584,33 @@ interface DbDialectAdapter {
     optimize(db: SQL, schema: DbSchema<any>): Promise<void>;
 }
 
+/** A secondary index declared alongside a table definition. */
+interface DbSchemaIndex {
+    readonly name: string;
+    readonly columns: string[];
+    readonly unique?: boolean;
+}
+/** Optional `DbSchema` configuration. */
+interface DbSchemaOptions {
+    /** Secondary indexes created together with the table. */
+    readonly indices?: readonly DbSchemaIndex[];
+}
 declare class DbSchema<T extends Record<string, any>> {
     readonly table: string;
     private readonly definitions;
     readonly dialect: DbDialectAdapter;
-    constructor(table: string, definitions: Record<keyof T, Column>, dialect: DbDialectAdapter);
+    private readonly indexDefinitions;
+    constructor(table: string, definitions: Record<keyof T, Column>, dialect: DbDialectAdapter, options?: DbSchemaOptions);
     entries(): Array<[string, Column]>;
+    /** Secondary indexes declared for this table. */
+    get indices(): DbSchemaIndex[];
     withDialect(dialect: DbDialectAdapter): DbSchema<T>;
+    /** The `CREATE TABLE IF NOT EXISTS` statement for this schema. */
+    createTableSQL(adapter?: DbDialectAdapter): string;
+    /** Idempotent `CREATE INDEX` statements for the declared indexes. */
+    createIndexSQLs(adapter?: DbDialectAdapter): string[];
+    /** Every DDL statement needed to create the table and its indexes. */
+    createStatements(adapter?: DbDialectAdapter): string[];
     createSQL(adapter?: DbDialectAdapter): string;
     columnDefinitions(adapter?: DbDialectAdapter): Record<string, string>;
     get columns(): {
@@ -1296,6 +1641,18 @@ type Where<T> = {
         value: unknown;
     };
 };
+/** Options accepted by {@link DbRepository.findMany}. */
+interface FindManyOptions<T> {
+    /** Row filter; keyword operators are the same ones `findAll` accepts. */
+    where?: Where<T>;
+    /** Ordering column and direction (`asc` by default). */
+    orderBy?: {
+        column: keyof T & string;
+        direction?: "asc" | "desc";
+    };
+    /** Maximum number of rows to return; must be a positive safe integer. */
+    limit?: number;
+}
 /** Shared CRUD repository. Dialect-specific statements are delegated to its adapter. */
 declare class DbRepository<T extends Record<string, any>> {
     private readonly db;
@@ -1315,6 +1672,19 @@ declare class DbRepository<T extends Record<string, any>> {
     upsert(data: T, conflictColumn: keyof T): Promise<T | undefined>;
     find(where: Where<T>): Promise<T | null>;
     findAll(where?: Where<T>): Promise<T[]>;
+    /**
+     * Read rows with optional filtering, ordering, and a row limit.
+     *
+     * Column names are validated against the schema, and the sort direction must
+     * be `"asc"` or `"desc"`, so neither can inject SQL. This is the dialect-
+     * neutral way to ask for a "latest N rows" slice, e.g.
+     * `findMany({ where: { topic }, orderBy: { column: "id", direction: "desc" }, limit: 50 })`.
+     *
+     * @param options.where   Optional equality/operator filter.
+     * @param options.orderBy Column and direction to sort by.
+     * @param options.limit   Positive integer cap on returned rows.
+     */
+    findMany(options?: FindManyOptions<T>): Promise<T[]>;
     count(where?: Where<T>): Promise<number>;
     exists(where: Where<T>): Promise<boolean>;
     paginate(page: number, limit: number, where?: Where<T>): Promise<T[]>;
@@ -1521,15 +1891,88 @@ interface CorsOptions {
 declare const cors: (options?: CorsOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
 
 interface CsrfOptions {
+    /** Request header compared with the `csrf_token` cookie. Default: `x-csrf-token`. */
     headerName?: string;
+    /**
+     * Token source for unsafe requests.
+     *
+     * - `"header"` (default) compares the configured request header with the
+     *   `csrf_token` cookie.
+     * - `"double-submit"` compares a JSON or form body field with the cookie. A
+     *   supplied header must still match the cookie when it is present.
+     */
+    mode?: "header" | "double-submit";
+    /**
+     * Body field read in `"double-submit"` mode. Default: `csrf_token`.
+     */
+    bodyField?: string;
+}
+/** Options accepted by {@link csrf.issue}. */
+interface CsrfIssueOptions extends CookieOptions {
+    /** Cookie that stores the token. Default: `csrf_token`. */
+    cookieName?: string;
+    /** Explicit token value. Default: a freshly minted random UUID. */
+    value?: string;
+}
+/** Result of {@link csrf.issue}. */
+interface CsrfIssuedToken {
+    /** The minted (or explicitly supplied) token. */
+    token: string;
+    /** The serialized `Set-Cookie` value for the token. */
+    cookie: string;
 }
 /**
- * Checks a CSRF header against the `csrf_token` cookie on state-changing requests.
+ * Mints a random CSRF token and serializes its cookie.
  *
- * @param options - Optional name of the request header containing the token.
+ * When the response builder exposes {@link res.setCookie} the cookie is also
+ * written through, so a handler can return its body directly:
+ *
+ * ```ts
+ * return res.json({ csrfToken: csrf.issue(ctx).token });
+ * ```
+ *
+ * Do not also pass the returned `cookie` to `res.header()` in that case or the
+ * response will carry two `Set-Cookie` values.
+ */
+declare function issue(requestCtx: ctx, options?: CsrfIssueOptions): CsrfIssuedToken;
+/**
+ * Checks a CSRF token on state-changing requests (`POST`, `PUT`, `DELETE`,
+ * `PATCH`).
+ *
+ * By default the `x-csrf-token` header is compared with the `csrf_token`
+ * cookie. Pass `{ mode: "double-submit" }` to compare a JSON or form body field
+ * instead:
+ *
+ * ```ts
+ * @use(csrf({ mode: "double-submit" })) // reads the `csrf_token` body field
+ * @use(csrf())                          // reads the `x-csrf-token` header
+ * ```
+ *
+ * The guard also exposes {@link csrf.issue} (mint a token plus its cookie) and
+ * {@link csrf.token} (token-only shortcut).
+ *
+ * @param options - Header name and token-source mode.
+ * @param overrideConfig - Optional error status/message/headers.
  * @returns A guard factory that accepts CSRF options and optional error config.
  */
-declare const csrf: (options?: CsrfOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;
+declare const csrf: ((options?: CsrfOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType) & {
+    /**
+     * Mints a random CSRF token, serializes its cookie, and writes the cookie
+     * through when the response builder supports direct cookie writes.
+     *
+     * @param requestCtx - Request context used to derive cookie flags.
+     * @param options - Cookie name, explicit value, and cookie flags.
+     * @returns The token and its serialized `Set-Cookie` value.
+     */
+    issue: typeof issue;
+    /**
+     * Mints a CSRF token (see {@link csrf.issue}) and returns just its value.
+     *
+     * @param requestCtx - Request context used to derive cookie flags.
+     * @returns The minted token.
+     */
+    token(requestCtx: ctx): string;
+};
 
 type DenyConfig = ErrorConfig & {
     /** When provided, the guard denies only requests where the predicate returns true; otherwise it continues. */
@@ -2721,5 +3164,5 @@ interface ScopeStatic {
 type Scope = _Scope;
 declare const Scope: ScopeStatic;
 
-export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, configureSqlite, contentType, cookies, cors, createGuard, createSqliteDatabase, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, isLocalRedirectTarget, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, sqliteIntegrityCheck, sqliteWalCheckpoint, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
-export type { AnySchema, AuthConfig, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CorsOptions, CsrfOptions, DbDialectAdapter, DbDialectName, DenyConfig, ErrorConfig, ErrorGuardOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, MultipartOptions, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, SqliteConfigOptions, SqliteConnection, SqliteConnectionInfo, SqliteJournalMode, SqliteSynchronous, SqliteTempStore, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssMessageRateLimit, WssRouteConfig, dev, methodsKeys, serverOptions, wssMessage };
+export { ArraySchema, BooleanSchema, Column, DEFAULT_MAX_SIZE, DEFAULT_TOPIC_HISTORY_LIMIT, DatabaseError, DbInspector, DbRepository, DbSchema, Field, ForeignKeyError, JWTAuthService, JwtEngine, McpController, Methods, NumberSchema, ObjectSchema, req as Req, res as Res, Rossa, RouterManager, Schema, SchemaError, Scope, ServerSide, SessionAuthInterface, StringSchema, UniqueConstraintError, WSSMAN, Websocket, WssManager, apiKey, auth, authBearer, authorize, configureSqlite, contentType, cookies, cors, createGuard, createSqliteDatabase, csrf, ctx, deny, errorHandler, getDialect, header, ipFilter, isLocalRedirectTarget, json, jwtAuth, jwtRefresh, jwtRotate, keys, logger, loggerFN, mariadbDialect, mcp, multipart, mysqlDialect, postgresDialect, rateLimit, requireSession, route, sanitize, security, sendError, session, smartCache, sqliteDialect, sqliteIntegrityCheck, sqliteWalCheckpoint, staticFiles, subManager, t, timeout, urlencoded, use, validateForm, validateQuery, validateUrl, wss, z_d as z };
+export type { AnySchema, AuthConfig, AutoBodyOptions, AutoBodyResult, BaseConfig, CacheOptions, ColumnType, ContentEncodingType, ContentTypeRules, CookieOptions, CorsOptions, CsrfIssueOptions, CsrfIssuedToken, CsrfOptions, DbDialectAdapter, DbDialectName, DbSchemaIndex, DbSchemaOptions, DenyConfig, ErrorConfig, ErrorGuardOptions, FindManyOptions, FormValidationOptions, GlobalGuard, GuardConfig, GuardFactoryHandler, GuardReturnType, HeaderValidationRules, HttpRouteConfig, HttpRouteMatch, InferSchema, InferShape, Issue, JWTConfig, JwtInspection, JwtPayload, JwtRefreshTokenStore, McpOptions, McpServerFactory, MultipartOptions, QueryValidationOptions, RateLimitOptions, RefreshConsumeResult, RefreshRejectionReason, RequireKeysOptions, RossaOptions, RossaWebSocketOptions, SafeParseFailure, SafeParseResult, SafeParseSuccess, SanitizeOptions, SchemaState, SecurityHeadersOptions, SessionConfig, SessionContext, SessionGuard, SessionInstance, SessionMount, SessionValidator, Shape, SqliteConfigOptions, SqliteConnection, SqliteConnectionInfo, SqliteJournalMode, SqliteSynchronous, SqliteTempStore, StandardIssue, StandardJSONSchemaConverter, StandardJSONSchemaOptions, StandardJSONSchemaTarget, StandardPathSegment, StandardSchema, StandardSchemaProps, StandardTypes, StandardValidateOptions, StandardValidateResult, StaticFilesOptions, TableStats, TopicBroadcastOptions, TopicHistoryStore, TopicMember, TopicPresenceEvent, TopicPresenceFrame, TopicPublishResult, TopicPublishStatus, UrlValidationOptions, UrlencodedOptions, Where, WssBaseController, WssConfig, WssHistoryConfig, WssMessageRateLimit, WssPresenceOptions, WssRouteConfig, WssSocketData, dev, methodsKeys, serverOptions, wssMessage };

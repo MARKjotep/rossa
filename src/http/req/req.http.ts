@@ -1,9 +1,31 @@
 import { DEFAULT_FILE_EXTENSIONS, isFile } from "@/core/static-server";
+import { DEFAULT_MAX_SIZE } from "@/guard/shared/body-cap.util";
 import type { Server, SocketAddress } from "bun";
 
 //
 
 export const fileExtensions = DEFAULT_FILE_EXTENSIONS;
+
+/** Options accepted by {@link req.autoBody}. */
+export interface AutoBodyOptions {
+  /**
+   * Maximum accepted request-body size in bytes.
+   *
+   * @default 1048576 (1 MiB, the shared `DEFAULT_MAX_SIZE`)
+   */
+  maxSize?: number;
+}
+
+/** Content-type-aware body selected by {@link req.autoBody}. */
+export interface AutoBodyResult<T = unknown> {
+  /**
+   * Parsed body: an object/array for JSON, `FormData` for form content types,
+   * or the raw string for anything else. `null` when the request had no body.
+   */
+  body: T | string | null;
+  /** How the body was interpreted. */
+  parsedWith: "json" | "form" | "text" | "empty";
+}
 
 // ---  ---------------------------------------------------------------
 
@@ -16,6 +38,7 @@ export class req {
   private _formData?: FormData;
   private _json?: any;
   private _txt?: string;
+  private _autoBody?: AutoBodyResult<any>;
 
   constructor(
     public readonly request: Request,
@@ -66,6 +89,96 @@ export class req {
     } catch {
       return (this._formData = new FormData());
     }
+  }
+
+  /**
+   * Reads the request body using its `Content-Type`.
+   *
+   * - `application/json` (and `+json`) is parsed with `JSON.parse`; malformed
+   *   JSON falls back to the raw text instead of throwing.
+   * - Form content types return the cached `FormData`.
+   * - Everything else returns the raw text.
+   * - An empty body returns `body: null` and `parsedWith: "empty"`.
+   *
+   * The result is cached like {@link req.text}, so repeated calls do not re-read
+   * the stream, and bodies larger than 1 MiB are rejected with an error instead
+   * of being parsed. This makes it safe for lenient endpoints that accept
+   * either JSON or form input:
+   *
+   * ```ts
+   * const { body, parsedWith } = await req.autoBody();
+   * ```
+   *
+   * @param options - Optional body-size cap.
+   * @returns The selected body and how it was interpreted.
+   */
+  async autoBody<T = unknown>(
+    options: AutoBodyOptions = {},
+  ): Promise<AutoBodyResult<T>> {
+    if (this._autoBody !== undefined) {
+      return this._autoBody as AutoBodyResult<T>;
+    }
+
+    const maxSize =
+      typeof options.maxSize === "number" && options.maxSize > 0
+        ? options.maxSize
+        : DEFAULT_MAX_SIZE;
+
+    const declaredLength = this.headers.get("content-length");
+    if (declaredLength !== null) {
+      if (!/^\d+$/.test(declaredLength)) {
+        throw new Error("Invalid Content-Length header");
+      }
+      if (Number(declaredLength) > maxSize) {
+        throw new Error(
+          `Payload exceeded maximum allowed size of ${maxSize / 1024} KB`,
+        );
+      }
+    }
+
+    const contentType = (this.headers.get("content-type") ?? "")
+      .split(";", 1)[0]!
+      .trim()
+      .toLowerCase();
+
+    let result: AutoBodyResult<any>;
+
+    if (this.isForm) {
+      const form = await this.form();
+      const firstEntry = form.entries().next();
+
+      result = firstEntry.done
+        ? { body: null, parsedWith: "empty" }
+        : { body: form, parsedWith: "form" };
+    } else {
+      const raw = await this.text();
+      const byteLength = new TextEncoder().encode(raw).byteLength;
+
+      if (byteLength > maxSize) {
+        throw new Error(
+          `Payload exceeded maximum allowed size of ${maxSize / 1024} KB`,
+        );
+      }
+
+      if (raw.length === 0) {
+        result = { body: null, parsedWith: "empty" };
+      } else if (
+        contentType === "application/json" ||
+        contentType.endsWith("+json")
+      ) {
+        try {
+          result = { body: JSON.parse(raw), parsedWith: "json" };
+        } catch {
+          // Malformed JSON is reported as text rather than rejected.
+          result = { body: raw, parsedWith: "text" };
+        }
+      } else {
+        result = { body: raw, parsedWith: "text" };
+      }
+    }
+
+    this._autoBody = result;
+    return result as AutoBodyResult<T>;
   }
 
   // --- LAZY GETTERS (Computed Once & Cached) ---

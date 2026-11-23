@@ -1,6 +1,10 @@
 import { type Server, type BunFile } from "bun";
 import { Compressor, type ContentEncodingType } from "./res.compressor";
 import { Heder } from "../headr";
+import {
+  setCookie as serializeCookie,
+  type CookieOptions,
+} from "../headr/headr.util";
 import { eStream, type StreamPushFn } from "./stream.res";
 import { isRecord, retry, type StaticOnly } from "@ohmyqt/u";
 import type { StaticFileServer } from "@/core/static-server";
@@ -168,6 +172,7 @@ export interface FileMeta {
 export class res {
   private _code: number = 200;
   private _headers: HeaderObject = {};
+  private _cookies: string[] = [];
   private _encoding?: ContentEncodingType;
 
   /**
@@ -299,6 +304,65 @@ export class res {
     return this;
   }
 
+  /**
+   * Appends a cookie to the response.
+   *
+   * Each call adds one independent `Set-Cookie` header, so multiple cookies are
+   * preserved and never merged into a single value. Serialization uses the same
+   * builder as {@link Heder.cookie} and the resulting value is sanitized like
+   * every other header, preventing CR/LF injection.
+   *
+   * ```ts
+   * res.setCookie("csrf_token", token, { path: "/", httpOnly: false, sameSite: "Lax" });
+   * ```
+   *
+   * @param name - Cookie name.
+   * @param value - Cookie value; use `clearCookie` to expire one.
+   * @param options - Flags and lifetime. `Path` defaults to `/`.
+   * @returns This response builder for chaining.
+   */
+  setCookie(name: string, value: string, options: CookieOptions = {}): this {
+    const resolved: CookieOptions = { path: "/", ...options };
+    this._cookies.push(
+      sanitizeHeaderValue(serializeCookie(name, value, resolved)),
+    );
+    return this;
+  }
+
+  /**
+   * Expires a cookie with `Max-Age=0` and an epoch `Expires` date.
+   *
+   * The `Path` and `Domain` (when supplied) must match the original cookie so
+   * the browser removes the same entry.
+   *
+   * ```ts
+   * res.clearCookie("csrf_token", { path: "/" });
+   * ```
+   *
+   * @param name - Cookie name.
+   * @param options - Flags matching the original cookie. `Path` defaults to `/`.
+   * @returns This response builder for chaining.
+   */
+  clearCookie(name: string, options: CookieOptions = {}): this {
+    return this.setCookie(name, "", {
+      ...options,
+      maxAge: 0,
+      expires: new Date(0),
+    });
+  }
+
+  /**
+   * Builds the response header set, appending every queued `Set-Cookie`
+   * separately so multiple cookies survive the trip to `Response#headers`.
+   */
+  private _buildHeaders(): Headers {
+    const headers = new Headers(safeHeaders(this._headers));
+    for (const cookie of this._cookies) {
+      headers.append("Set-Cookie", cookie);
+    }
+    return headers;
+  }
+
   private _assemble(body: any, contentType: string): Response {
     const raw = Compressor.toUint8(body);
     const { payload, encoding } = Compressor.handle(raw, this._encoding);
@@ -311,15 +375,20 @@ export class res {
       (contentType.startsWith("text/") || contentType === "application/json") &&
       !contentType.includes("charset=");
 
+    const headers = this._buildHeaders();
+    if (!headers.has("Content-Type")) {
+      headers.set(
+        "Content-Type",
+        needsCharset ? `${contentType}; charset=utf-8` : contentType,
+      );
+    }
+    if (!headers.has("Content-Length")) {
+      headers.set("Content-Length", payload.length.toString());
+    }
+
     return new Response(payload as BodyInit, {
       status: this._code,
-      headers: {
-        "Content-Type": needsCharset
-          ? `${contentType}; charset=utf-8`
-          : contentType,
-        "Content-Length": payload.length.toString(),
-        ...safeHeaders(this._headers),
-      },
+      headers,
     });
   }
 
@@ -331,7 +400,7 @@ export class res {
   null(status: number = this._code): Response {
     return new Response(null, {
       status,
-      headers: safeHeaders(this._headers),
+      headers: this._buildHeaders(),
     });
   }
 
@@ -422,12 +491,11 @@ export class res {
 
   /** Emits an empty redirect with a sanitized `Location` value. */
   private _redirectTo(target: string, status: number): Response {
+    const headers = this._buildHeaders();
+    headers.set("Location", sanitizeHeaderValue(target));
     return new Response(null, {
       status,
-      headers: {
-        ...safeHeaders(this._headers),
-        Location: sanitizeHeaderValue(target),
-      },
+      headers,
     });
   }
 
@@ -548,18 +616,20 @@ export class res {
       ? file.type
       : (meta?.type ?? "application/octet-stream");
 
-    const baseHeaders: HeaderObject = {
-      "Content-Type": fileType,
-      "Accept-Ranges": isBunFile ? "bytes" : "none",
-      ...safeHeaders(this._headers),
-    };
+    const baseHeaders = this._buildHeaders();
+    if (!baseHeaders.has("Content-Type")) {
+      baseHeaders.set("Content-Type", fileType);
+    }
+    if (!baseHeaders.has("Accept-Ranges")) {
+      baseHeaders.set("Accept-Ranges", isBunFile ? "bytes" : "none");
+    }
 
     const rangeHeader = isBunFile ? this.req.headers.get("range") : null;
 
     // --- Standard Request ---
     if (!rangeHeader) {
       let body: BodyInit = file as BodyInit;
-      const finalHeaders: HeaderObject = { ...baseHeaders };
+      const finalHeaders = new Headers(baseHeaders);
 
       if (this._encoding && this._encoding !== "none") {
         try {
@@ -574,13 +644,13 @@ export class res {
           );
 
           body = payload as BodyInit;
-          if (enc) finalHeaders["Content-Encoding"] = enc;
-          finalHeaders["Content-Length"] = payload.length.toString();
+          if (enc) finalHeaders.set("Content-Encoding", enc);
+          finalHeaders.set("Content-Length", payload.length.toString());
         } catch (error) {
           return this.error(500, "Error reading file");
         }
       } else {
-        finalHeaders["Content-Length"] = fileSize.toString();
+        finalHeaders.set("Content-Length", fileSize.toString());
       }
 
       return new Response(body, {
@@ -590,14 +660,11 @@ export class res {
     }
 
     // --- Range Request (BunFile only) ---
-    const rangeNotSatisfiable = () =>
-      new Response(null, {
-        status: 416,
-        headers: {
-          "Content-Range": `bytes */${fileSize}`,
-          ...safeHeaders(this._headers),
-        },
-      });
+    const rangeNotSatisfiable = () => {
+      const headers = this._buildHeaders();
+      headers.set("Content-Range", `bytes */${fileSize}`);
+      return new Response(null, { status: 416, headers });
+    };
 
     const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
     if (!rangeMatch) return rangeNotSatisfiable();
@@ -634,13 +701,13 @@ export class res {
     // RFC 9110: an end position beyond the representation is clamped to its last byte.
     end = Math.min(end, fileSize - 1);
 
+    const rangeHeaders = new Headers(baseHeaders);
+    rangeHeaders.set("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+    rangeHeaders.set("Content-Length", (end - start + 1).toString());
+
     return new Response((file as BunFile).slice(start, end + 1), {
       status: 206,
-      headers: {
-        ...baseHeaders,
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Content-Length": (end - start + 1).toString(),
-      },
+      headers: rangeHeaders,
     });
   }
 
@@ -651,17 +718,19 @@ export class res {
    * encoding the stream does not use makes browsers and Bun `fetch` fail to
    * decode the frames.
    */
-  private _eventHeaders(): HeaderObject {
-    const headers = safeHeaders(this._headers);
-    for (const name of Object.keys(headers)) {
-      if (name.toLowerCase() === "content-encoding") delete headers[name];
+  private _eventHeaders(): Headers {
+    const headers = this._buildHeaders();
+    headers.delete("Content-Encoding");
+    if (!headers.has("Content-Type")) {
+      headers.set("Content-Type", "text/event-stream");
     }
-    return {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...headers,
-    };
+    if (!headers.has("Cache-Control")) {
+      headers.set("Cache-Control", "no-cache");
+    }
+    if (!headers.has("Connection")) {
+      headers.set("Connection", "keep-alive");
+    }
+    return headers;
   }
 
   /**

@@ -12,6 +12,34 @@ export type Where<T> = {
   [K in keyof T]?: T[K] | { operator: string; value: unknown };
 };
 
+/** Options accepted by {@link DbRepository.findMany}. */
+export interface FindManyOptions<T> {
+  /** Row filter; keyword operators are the same ones `findAll` accepts. */
+  where?: Where<T>;
+  /** Ordering column and direction (`asc` by default). */
+  orderBy?: { column: keyof T & string; direction?: "asc" | "desc" };
+  /** Maximum number of rows to return; must be a positive safe integer. */
+  limit?: number;
+}
+
+const ORDER_DIRECTIONS: Record<string, "ASC" | "DESC"> = {
+  asc: "ASC",
+  desc: "DESC",
+};
+
+/** Allowlist the sort direction so only fixed SQL keywords reach the query. */
+function normalizeDirection(direction: unknown): "ASC" | "DESC" {
+  const requested =
+    direction === undefined ? "asc" : String(direction).toLowerCase();
+  const normalized = ORDER_DIRECTIONS[requested];
+  if (!normalized) {
+    throw new TypeError(
+      `Unsupported order direction: ${String(direction)}. Use "asc" or "desc".`,
+    );
+  }
+  return normalized;
+}
+
 const ALLOWED_OPERATORS = new Set([
   "=",
   "!=",
@@ -205,6 +233,62 @@ export class DbRepository<T extends Record<string, any>> {
           T[]
         >`SELECT * FROM ${this.table} WHERE ${this.buildWhere(where)}`
       : await this.db<T[]>`SELECT * FROM ${this.table}`;
+  }
+
+  /**
+   * Read rows with optional filtering, ordering, and a row limit.
+   *
+   * Column names are validated against the schema, and the sort direction must
+   * be `"asc"` or `"desc"`, so neither can inject SQL. This is the dialect-
+   * neutral way to ask for a "latest N rows" slice, e.g.
+   * `findMany({ where: { topic }, orderBy: { column: "id", direction: "desc" }, limit: 50 })`.
+   *
+   * @param options.where   Optional equality/operator filter.
+   * @param options.orderBy Column and direction to sort by.
+   * @param options.limit   Positive integer cap on returned rows.
+   */
+  async findMany(options: FindManyOptions<T> = {}): Promise<T[]> {
+    const { where, orderBy, limit } = options;
+    const knownColumns = new Set(
+      this.schema.entries().map(([name]) => name),
+    );
+
+    for (const column of Object.keys(where ?? {})) {
+      if (!knownColumns.has(column)) {
+        throw new TypeError(
+          `Unknown column '${column}' on table '${this.schema.table}'.`,
+        );
+      }
+    }
+
+    let ordering = sql``;
+    if (orderBy) {
+      if (!knownColumns.has(orderBy.column)) {
+        throw new TypeError(
+          `Unknown column '${String(orderBy.column)}' on table '${this.schema.table}'.`,
+        );
+      }
+      ordering = sql` ORDER BY ${this.identifier(orderBy.column)} ${sql.unsafe(
+        normalizeDirection(orderBy.direction),
+      )}`;
+    }
+
+    if (
+      limit !== undefined &&
+      (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1)
+    ) {
+      throw new RangeError("Limit must be a positive safe integer.");
+    }
+
+    const filtering =
+      where && Object.keys(where).length
+        ? sql` WHERE ${this.buildWhere(where)}`
+        : sql``;
+    const limiting = limit === undefined ? sql`` : sql` LIMIT ${limit}`;
+
+    return await this.db<T[]>`
+      SELECT * FROM ${this.table}${filtering}${ordering}${limiting}
+    `;
   }
 
   async count(where?: Where<T>): Promise<number> {

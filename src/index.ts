@@ -79,19 +79,33 @@ export type {
 
 export { ctx } from "./http/ctx";
 export { Req } from "./http/req";
+export type { AutoBodyOptions, AutoBodyResult } from "./http/req/req.http";
 export { Res } from "./http/res";
 export { isLocalRedirectTarget, sendError } from "./http/res";
 export type { ErrorConfig } from "./http/res";
+export type { CookieOptions } from "./http/headr/headr.util";
 
 export { Websocket } from "./wss/websocket.wss";
+export type { WssSocketData } from "./wss/websocket.wss";
 export { WSSMAN } from "./wss/config.wss";
 export { WssManager, subManager } from "./wss/wss-manager";
-export type { TopicPublishResult, TopicPublishStatus } from "./wss/wss-manager";
 export type {
+  TopicBroadcastOptions,
+  TopicMember,
+  TopicPresenceEvent,
+  TopicPresenceFrame,
+  TopicPublishResult,
+  TopicPublishStatus,
+} from "./wss/wss-manager";
+export type {
+  TopicHistoryStore,
   WssConfig,
+  WssHistoryConfig,
   WssMessageRateLimit,
+  WssPresenceOptions,
   wssMessage,
 } from "./wss/config.wss";
+export { DEFAULT_TOPIC_HISTORY_LIMIT } from "./wss/config.wss";
 
 export { Field } from "./services/field.service";
 export { Scope } from "./services/scope.service";

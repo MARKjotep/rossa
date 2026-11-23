@@ -192,7 +192,10 @@ class PublicFiles extends Methods {
 ```
 
 The static server checks resolved paths against the configured root (including
-symlink resolution), caches small files, and supports ETags.
+symlink resolution), caches small files, and supports ETags. Pair `head()` with
+the `get()` above (same status and headers, empty body) if `curl -I` must answer
+`200`, or mount `staticFiles()` — the built-in guard serves GET and HEAD
+together. See [`doc/features.md`](doc/features.md#static-files).
 
 ## WebSockets
 
@@ -251,6 +254,14 @@ set admin flags, and configure room capacity or payload limits. Broadcast
 results report each topic as `sent`, `backpressured`, `dropped`, or `oversize`;
 `backpressured` is Bun's `-1`-only status and cannot be forced by app code.
 
+`Websocket<TData, TIdentity>` types per-connection state on `this.data`, the
+guard identity on `this.user`, and the handshake query on `this.query`.
+`broadcast(topics, data, { includeSelf: true })` also delivers the frame to the
+publishing socket, `members(topic)` returns a typed `{ id, nickname, userId? }`
+list, `WssConfig.presence` emits join/leave frames automatically, and
+`WssConfig.history` persists and replays frames through an application
+`TopicHistoryStore`.
+
 For the handshake, frame parsing, lifecycle, and sample chat message contract,
 see [`doc/websockets.md`](doc/websockets.md).
 
@@ -282,11 +293,13 @@ app.registerMCP(Assistant);
 For an explicit path without a controller class, pass a per-request factory:
 `app.registerMCP("/mcp", (context) => new McpServer({ name: "raw", version: "1.0.0" }))`.
 
-`origin` accepts full origins, bare hostnames, or `scheme://*`; requests without
-an `Origin` header always pass. POST is served, GET and DELETE return `405`, and
-OPTIONS/HEAD return `404`. Global `app.use(...)` guards run before the endpoint
-and can block it, but header-only guards such as `cors()` do not decorate the
-SDK's response; use `origin` or handle MCP CORS at a proxy.
+`origin` accepts full origins, bare hostnames, or scheme wildcards
+(`"https://*"` allows any https origin and rejects http, `"http://*"` the
+reverse, and `"moz-extension://*"` keeps the SDK's extension behavior). Requests
+without an `Origin` header always pass. POST is served, GET and DELETE return
+`405`, and OPTIONS/HEAD return `404`. Global `app.use(...)` guards run before
+the endpoint and can block it, but header-only guards such as `cors()` do not
+decorate the SDK's response; use `origin` or handle MCP CORS at a proxy.
 
 See the [MCP chapter](doc/features.md#mcp-model-context-protocol) and the
 [official TypeScript SDK docs](https://ts.sdk.modelcontextprotocol.io/v2/).
@@ -317,7 +330,15 @@ console.log(response.status, await response.text());
 `McpServer`, `mcp`); authentication (`JWTAuthService`, `JwtEngine`,
 `SessionAuthInterface`, `ServerSide`, and the session/JWT types), database, and
 `Field`/`Scope` APIs. `JWTAuthService.sign(payload, lifetimeSeconds?)` accepts a
-per-call lifetime; the lower-level `JwtEngine.signSeconds` is exported too. See
+per-call lifetime; the lower-level `JwtEngine.signSeconds` is exported too.
+
+The 0.1.5 surface adds the database types `FindManyOptions`, `DbSchemaOptions`,
+and `DbSchemaIndex`; the WebSocket types `WssSocketData`, `TopicMember`,
+`TopicPresenceEvent`, `TopicPresenceFrame`, `TopicBroadcastOptions`,
+`WssHistoryConfig`, `WssPresenceOptions`, and `TopicHistoryStore`, plus
+`DEFAULT_TOPIC_HISTORY_LIMIT`; the request/response types `AutoBodyOptions`,
+`AutoBodyResult`, and `CookieOptions`; and the CSRF types `CsrfOptions`,
+`CsrfIssueOptions`, and `CsrfIssuedToken`. See
 [`doc/features.md`](doc/features.md) for names.
 
 ## Documentation and examples

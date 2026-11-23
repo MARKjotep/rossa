@@ -221,7 +221,7 @@ after the global pipeline.
 | `validateUrl(options?)`     | Checks URL and query length, duplicate or disallowed keys, value patterns, malformed escapes, null bytes, and traversal in the pathname and decoded query string. |
 | `contentType(rule)`         | Accepts a MIME type, a list, or a sync predicate. Parameters such as `charset` are ignored.                            |
 | `cors(options)`             | Applies CORS headers and validates origins. Supports `origin`, `allowHeaders`, `exposeHeaders`, `credentials`, and `maxAge`. |
-| `csrf(options?)`            | Compares a header (default `x-csrf-token`) with the `csrf_token` cookie on POST, PUT, PATCH, and DELETE.               |
+| `csrf(options?)`            | Compares a request token with the `csrf_token` cookie on POST, PUT, PATCH, and DELETE. Header mode (default) reads `x-csrf-token`; `{ mode: "double-submit" }` reads a JSON/form body field (default `csrf_token`). `csrf.issue(ctx, options?)` / `csrf.token(ctx)` mint the token. |
 | `header(rules)`             | Requires header names or validates them with a map of synchronous checks.                                             |
 | `ipFilter(options)`         | Applies `whitelist` and `blacklist` rules for IPv4 addresses, wildcard patterns, and CIDR ranges.                     |
 | `rateLimit(options?)`       | In-memory fixed-window request limit keyed by IP, method, and path. Defaults: 100 requests per 60 seconds.            |
@@ -332,6 +332,7 @@ so multiple helpers can read the same request safely.
 | `server`                   | Bun server when the request came from `app.serve()`.                                          |
 | `text()`                   | Cached raw body text. Returns `""` on failure.                                               |
 | `json<T>()`                | Cached parsed JSON. Returns an empty object when parsing fails; use validation guards for trust. |
+| `autoBody<T>(options?)`    | Content-type-aware body: JSON for `application/json` (and `+json`), `FormData` for form content types, raw text otherwise, `null` for an empty body. Cached, capped at 1 MiB by default (`{ maxSize }`), and malformed JSON falls back to `"text"`. |
 | `form()`                   | Parsed `FormData` for form content types; returns an empty `FormData` otherwise.             |
 | `url`                      | Cached `URL`.                                                                                |
 | `query`                    | Query parameters as a plain record. Duplicate names keep the last value.                     |
@@ -349,6 +350,17 @@ so multiple helpers can read the same request safely.
 | `getAuthCredentials()`     | Reads session cookie, bearer token, and form `refresh_token`.                                |
 | `upgrade(data)`            | Calls Bun's server upgrade for the request and returns whether it succeeded.                 |
 
+`req.autoBody<T>()` returns `{ body, parsedWith }`, where `parsedWith` is
+`"json" | "form" | "text" | "empty"`. Use it on lenient endpoints that accept
+either shape:
+
+```ts
+const { body, parsedWith } = await req.autoBody();
+// parsedWith === "json" → body is the parsed value
+// parsedWith === "form" → body is FormData
+// parsedWith === "empty" → body is null
+```
+
 There is no separate `files` helper. Use `req.form()` or the `multipart()` guard
 to read uploads; uploaded entries remain `File` objects.
 
@@ -361,6 +373,8 @@ methods return a standard `Response`.
 | -------------------------- | -------------------------------------------------------------------------------------------- |
 | `status(code)`             | Set the response status. Returns `res` for chaining.                                         |
 | `header(input)`            | Add or replace headers. `Vary` values are merged.                                             |
+| `setCookie(name, value, options?)` | Append one `Set-Cookie` header; multiple calls are preserved. Reuses `CookieOptions` and value sanitization, and defaults `Path=/`. |
+| `clearCookie(name, options?)` | Expire a cookie: empty value, `Max-Age=0`, and an epoch `Expires`.                          |
 | `encode(type)`             | Set or clear the response content encoding.                                                  |
 | `null(status?)`            | Empty response with the given or current status.                                             |
 | `json(value)`              | `application/json` response.                                                                 |
@@ -373,6 +387,23 @@ methods return a standard `Response`.
 | `redirectExternal(url, status?)` | Redirect to an absolute `http:`/`https:` URL only; other targets answer `400`.          |
 | `file(file, meta?, headers?)` | Send a Bun file or `Uint8Array`. Bun files support byte ranges and return `416` for invalid ranges. |
 | `fileServer()`             | Serve the current request through the configured static file server.                          |
+
+#### Response cookies
+
+`res.setCookie()` writes cookies directly to the response and keeps every
+`Set-Cookie` header separate, so one response can set several cookies:
+
+```ts
+return res
+  .setCookie("csrf_token", token, { path: "/", httpOnly: false, sameSite: "Lax" })
+  .setCookie("theme", "dark", { path: "/", maxAge: 60 * 60 * 24 * 365 })
+  .json({ success: true });
+```
+
+`clearCookie(name)` is the matching expiry: it sends an empty value with
+`Max-Age=0` and an epoch `Expires`. Both accept the exported `CookieOptions`
+(`path`, `domain`, `httpOnly`, `secure`, `sameSite`, `maxAge`, `expires`) and
+strip control characters from names and values.
 
 #### Redirect targets
 
@@ -509,9 +540,38 @@ cleanup.
 > class. Move those overrides to `onClose()`.
 
 `this.send = value` sends a string or byte buffer to the current socket.
-`this.ws` is the native Bun `ServerWebSocket`. `this.manager` is a
+`this.ws` is the native Bun `ServerWebSocket<WssSocketData>`, so `this.ws.data`
+is typed (`{ id, nickname?, contextData?, instance? }`). `this.manager` is a
 per-connection `subManager`. Values that guards put in `ctx.data` before the
 upgrade are copied to `this.contextData` before `open()`.
+
+`Websocket<TData, TIdentity>` exposes the guard identity and the handshake query
+with types instead of casts:
+
+```ts
+interface ChatIdentity {
+  nickname: string;
+  id?: string;
+}
+
+@wss("/chat")
+class Chat extends Websocket<{ seen: number }, ChatIdentity> {
+  open() {
+    const nickname = this.user.nickname; // from ctx.data.user/chatUser/principal
+    const room = this.query.get("room") ?? "lobby";
+    this.data.seen = 0;
+    this.manager.subscribe(room);
+  }
+}
+```
+
+`this.user` resolves `contextData.user` → `contextData.chatUser` →
+`contextData.principal` → `ws.data.user`, and defaults to `{}` when no guard
+attached an identity. `TIdentity` defaults to `Record<string, any>`, so existing
+untyped subclasses keep compiling. `this.query` is the handshake URL's
+`URLSearchParams`; it is captured by the default `capacityTopics(ctx)`
+implementation, so an override should call `super.capacityTopics(ctx)` to keep
+it populated (the router has no other pre-upgrade hook to pass it through).
 
 If a JSON frame has a top-level string `topic`, Rossa exposes it as `topic` and
 removes it from `json`. This does not automatically subscribe or route the
@@ -542,7 +602,9 @@ When a declared topic is already at `maxClients`, the upgrade is answered with
 `this.manager` are not. Set the topic's `maxClients` before the upgrade (module
 scope, a guard, or `WSSMAN.setTopicConfig`). Return `[]` (the default) for
 topics only known after the handshake; `subscribe()` then keeps its late-join
-throw as before.
+throw as before. The default implementation also snapshots the handshake query
+into `this.query`; if you override `capacityTopics`, call
+`super.capacityTopics(ctx)` when you rely on `this.query`.
 
 ### Topics and broadcasting
 
@@ -557,6 +619,9 @@ this.manager.setTopicConfig("room-1", {
 
 const results = this.manager.broadcast(["room-1"], { type: "message" });
 // [{ topic: "room-1", status: "sent" }]
+
+// Also deliver the frame to the publishing socket:
+this.manager.broadcast(["room-1"], { type: "message" }, { includeSelf: true });
 ```
 
 | `subManager` method              | Purpose                                                                    |
@@ -564,18 +629,21 @@ const results = this.manager.broadcast(["room-1"], { type: "message" });
 | `subscribe(topic)`               | Subscribe the current socket. Throws when the room is full or closed.      |
 | `unsubscribe(topic)`             | Leave a topic.                                                             |
 | `isSubscribed(topic)`            | Check the current socket's membership.                                     |
-| `broadcast(topics, data)`        | Publish to unique topics; returns per-topic publish results.               |
+| `broadcast(topics, data, options?)` | Publish to unique topics; returns per-topic publish results. `{ includeSelf: true }` also sends one copy to the publishing socket. |
+| `members(topic)`                 | Typed `TopicMember[]` for a topic: `{ id, nickname, userId? }`.            |
 | `setAdmin(topic)` / `isAdmin(topic)` | Track and query room admin flags.                                      |
-| `setTopicConfig(topic, config)`  | Set `maxClients` and `maxPayloadSize` for a topic.                         |
+| `setTopicConfig(topic, config)`  | Set `maxClients`, `maxPayloadSize`, `presence`, and `history` for a topic. |
 | `cleanup()` / `unregister()`     | Remove the connection and its topic memberships.                           |
 
 `WSSMAN` additionally exposes `getMemberDetails(topic)`, `getUserTopics(id)`,
-and `get(topic)`. `WssConfig` supports:
+`members(topic)`, and `get(topic)`. `WssConfig` supports:
 
 | Option           | Default    | Meaning                                                                    |
 | ---------------- | ---------- | -------------------------------------------------------------------------- |
 | `maxClients`     | `Infinity` | Maximum members in a topic.                                                |
 | `maxPayloadSize` | `65536`    | Maximum broadcast payload bytes for the topic.                             |
+| `presence`       | off        | Emit automatic join/leave frames. `true` or `{ join?, leave? }`.           |
+| `history`        | off        | Persist and replay accepted frames through a `TopicHistoryStore`.          |
 
 `broadcast()` JSON-stringifies non-string values. Each result status is one of:
 
@@ -591,6 +659,65 @@ past Bun's outbound drain threshold. Application code cannot force it —
 in-process peers always read — so it is not a testable manager result. Observe
 backpressure through `ws.send()`/`drain()` or Bun's `backpressureLimit`; treat
 `backpressured` as a pass-through status, not an app branch.
+
+#### Presence events
+
+Opt in per topic. Rossa then emits ordinary broadcast frames
+`{ type: "join" | "leave", topic, member, members }`, where `member` is the
+socket that joined or left and `members` is the post-change roster
+(`TopicMember[]`, each `{ id, nickname, userId? }`):
+
+```ts
+this.manager.setTopicConfig("lobby", { presence: true });
+// or suppress one side: { presence: { leave: false } }
+
+this.manager.members("lobby"); // TopicMember[]: [{ id: "…", nickname: "rosa" }]
+```
+
+Join frames reach the joining socket as well as the existing members; leave
+frames reach the remaining members after removal. `presence: true` enables both
+events and `{ join?, leave? }` defaults each enabled key to `true`. A topic
+without `presence` emits no extra frames, so existing protocols are unchanged.
+Presence frames are never persisted. The frame type is exported as
+`TopicPresenceFrame` and the member type as `TopicMember`.
+
+#### History and replay
+
+`WssHistoryConfig` plugs a `TopicHistoryStore` (`save(topic, frame)` /
+`recent(topic, limit)`) into a topic:
+
+```ts
+import type { TopicHistoryStore } from "rossa";
+
+const store: TopicHistoryStore = {
+  async save(topic, frame) {
+    await db`INSERT INTO messages (topic, payload) VALUES (${topic}, ${JSON.stringify(frame)})`;
+  },
+  async recent(topic, limit) {
+    const rows = await db`SELECT payload FROM messages WHERE topic = ${topic} ORDER BY id DESC LIMIT ${limit}`;
+    return rows.map((row) => JSON.parse(row.payload)).reverse(); // oldest → newest
+  },
+};
+
+this.manager.setTopicConfig("lobby", {
+  history: { store, limit: 50 },
+});
+```
+
+Contract and defaults:
+
+- Frames are handed to `save()` exactly as passed to `broadcast()` — an object
+  or a string, with no marker injected. The frame shape stays application-owned.
+- Saves run in broadcast order per topic, and a joining socket's replay first
+  awaits pending saves, so it never misses a just-accepted frame.
+- `recent(topic, limit)` must return oldest → newest; Rossa sends each entry as
+  its own frame, in that order, when a socket joins.
+- `limit` defaults to `DEFAULT_TOPIC_HISTORY_LIMIT` (`50`); non-positive or
+  non-integer values fall back to it.
+- `replay: false` persists without replaying. `persist(frame)` filters what is
+  stored; returning `false` skips the frame.
+- Only accepted frames are persisted: oversize payloads are skipped, and
+  presence or replayed frames are never written back.
 
 ### Limits
 
@@ -690,8 +817,16 @@ Origin entries may be:
 
 - Full origins such as `https://app.example.com`, matched exactly by scheme,
   host, and port.
-- Bare hostnames such as `app.example.com`, matched port-agnostically.
-- Scheme wildcards such as `moz-extension://*`.
+- Bare hostnames such as `app.example.com`, matched port-agnostically in either
+  scheme.
+- Scheme wildcards. `"https://*"` allows any https origin and rejects http;
+  `"http://*"` is the inverse; `"moz-extension://*"` and other non-web schemes
+  keep the SDK's extension-wildcard behavior.
+
+Rossa validates `http`/`https` scheme wildcards itself before delegating to the
+SDK, whose wildcard rule covers only non-web schemes. That makes
+`"https://*"`/`"http://*"` mean "any origin of that scheme, on any host and
+port". Lists may mix wildcards, exact origins, and hostnames.
 
 Requests without an `Origin` header always pass, because non-browser MCP
 clients do not send one. A request whose `Origin` does not match returns `403`
@@ -847,6 +982,21 @@ immediately; the guard persists the new row and cookie after the handler
 returns, so rotate on the success path only. A readonly mount ignores rotation
 with a warning.
 
+For login and logout, `reset()` and `clear()` combine rotation with data
+replacement:
+
+```ts
+await ctx.session!.reset({ userId: user.id }); // login
+await ctx.session!.clear(); // logout
+```
+
+`reset(data)` rotates first (the old `sid` is unusable), replaces the stored
+data with `data`, updates `length`, and marks the session modified so the guard
+persists it. `clear()` empties every key and marks the session modified, so the
+guard deletes the row and expires the cookie — the request continues
+anonymously, which makes `requireSession()` deny the next request. Both are
+no-ops with a warning on a readonly mount.
+
 `SESSION_LIFETIME` and `COOKIE_LIFETIME` are measured in days and fractional
 values are honoured to the millisecond (`0.5` is twelve hours). The guard
 serializes the cookie before persisting: a `MAX_COOKIE_SIZE` overflow answers
@@ -963,12 +1113,41 @@ const rosa = await users.find({ name: "Rosa" });
 `t` provides logical column builders: `text()`, `int()`, `bigint()`,
 `boolean()`, `json()`, `timestamp()`, `serial()`, and `numeric(precision,
 scale)`. A `Column` supports `.primary`, `.notNull`, `.unique`, `.defaultNow`,
-and `.default(value)`.
+and `.default(value)`, plus `.autoIncrement()` on `serial()`, `int()`, and
+`bigint()` columns. The flag renders per dialect — SQLite
+`PRIMARY KEY AUTOINCREMENT` (primary-key columns only), PostgreSQL
+`GENERATED BY DEFAULT AS IDENTITY`, MySQL `AUTO_INCREMENT` for non-serial
+columns — and unsupported column types throw a `TypeError`.
 
 `DbSchema<T>` combines a table name, typed column definitions, and a dialect. It
 can emit DDL (`createSQL`) and column definitions, and it exposes `columns` for
 type-safe references. The selected dialect maps logical types to native column
-types.
+types. An optional fourth argument declares secondary indexes, emitted with the
+table DDL and applied idempotently by `create()`:
+
+```ts
+const schema = new DbSchema<{ id: number; topic: string; body: string }>(
+  "messages",
+  {
+    id: t.serial().primary.autoIncrement(),
+    topic: t.text().notNull,
+    body: t.text().notNull,
+  },
+  sqliteDialect,
+  {
+    indices: [
+      { name: "messages_topic_id", columns: ["topic", "id"] },
+      { name: "messages_body", columns: ["body"], unique: true },
+    ],
+  },
+);
+```
+
+Index names must be unique per schema, columns must exist in the definition, and
+`unique` is optional. `schema.indices` returns the validated list;
+`createTableSQL()`, `createIndexSQLs()`, and `createStatements()` expose the
+generated DDL, and `createSQL()` combines table and indexes. Re-running
+`create()` is a no-op for existing tables and indexes.
 
 ### Repository
 
@@ -976,7 +1155,7 @@ types.
 
 - `create()` and `syncColumns(allowDrop?)`.
 - `testConnection()` and `withContext(sql)`.
-- `insert`, `find`, `findAll`, `paginate`, `count`, and `exists`.
+- `insert`, `find`, `findAll`, `findMany`, `paginate`, `count`, and `exists`.
 - `update`, `delete`, and `transaction`.
 - `inspect` for a bound `DbInspector`.
 
@@ -986,11 +1165,34 @@ when dropping columns is intentional. `Where<T>` values may be plain values or
 `<=`, `>`, `>=`, `LIKE`, `ILIKE`, `IS`, `IS NOT`, `IN`, and `NOT IN`. Values are
 bound as parameters; keep table and column names in trusted schema definitions.
 
+`findMany({ where?, orderBy?, limit? })` adds ordered, limited reads without raw
+SQL — for example "latest N rows", newest first:
+
+```ts
+const recent = await users.findMany({
+  where: { name: "Rosa" },
+  orderBy: { column: "id", direction: "desc" },
+  limit: 20,
+});
+```
+
+`where` accepts the same conditions as `findAll`. `orderBy.column` must be a
+schema column and `direction` is `"asc"` (default) or `"desc"`; both are
+validated, and `limit` must be a positive safe integer. The option type is
+exported as `FindManyOptions<T>`.
+
 ### Dialects
 
 The package exports `sqliteDialect`, `postgresDialect`, `mysqlDialect`,
 `mariadbDialect`, and `getDialect(name)` for `"sqlite"`, `"postgres"`, `"mysql"`,
 and `"mariadb"`. Bun's `mysql2://` URL works with `mysqlDialect`.
+
+Custom `DbDialectAdapter` implementations must implement the two index members
+added for declarative indexes: `createIndexSQL(table, index)` (returns the
+`CREATE INDEX` statement or statements for the dialect) and
+`createIndex(db, schema, index)` (applies it idempotently). Existing adapters
+that only implement table DDL need these methods before they compile against
+0.1.5.
 
 ### Inspector
 
@@ -1077,8 +1279,28 @@ class Assets extends Methods {
     if (req.isFile) return res.fileServer();
     return res.null(404);
   }
+
+  // Dispatch is slot-exact, so pair HEAD with GET. Keep headers, drop the body.
+  async head({ req, res }: ctx) {
+    if (!req.isFile) return res.null(404);
+    const response = await res.fileServer();
+    return new Response(null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
 }
 ```
+
+A `res.fileServer()`-based catch-all answers only the methods it declares;
+without the `head()` pairing, `curl -I <asset>` reaches the base `head()` and
+answers `404`. Pairing it as above makes HEAD mirror the GET status,
+`Content-Type`, `Content-Length`, and other headers with an empty body while
+missing paths stay `404` for both. The built-in `staticFiles()` guard needs no
+pairing: it intercepts GET and HEAD together and already strips the HEAD body,
+so mounting `app.use(staticFiles())` (or a prefixed/rooted variant) is the
+shortest path for a whole asset tree.
 
 Serving behavior:
 

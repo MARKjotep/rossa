@@ -1,5 +1,11 @@
-import { WSSMAN, type WssConfig } from "./config.wss";
+import {
+  DEFAULT_TOPIC_HISTORY_LIMIT,
+  WSSMAN,
+  type WssConfig,
+  type WssHistoryConfig,
+} from "./config.wss";
 import type { ServerWebSocket } from "bun";
+import { resolveSocketIdentity } from "./websocket.wss";
 
 export type TopicPublishStatus =
   "sent" | "backpressured" | "dropped" | "oversize";
@@ -19,12 +25,58 @@ export interface TopicPublishResult {
   status: TopicPublishStatus;
 }
 
+/** Options for {@link subManager.broadcast} / {@link WssManager.broadcastToTopics}. */
+export interface TopicBroadcastOptions {
+  /**
+   * Also deliver the frame to the publishing socket. Bun's `publish()`
+   * excludes the publisher, so this sends one copy through `ws.send()` before
+   * fanning out. Defaults to `false` (sender-exclusive, today's behavior).
+   * When every target topic rejects the payload as oversize, the sender gets
+   * no copy either.
+   */
+  includeSelf?: boolean;
+}
+
+/** One member of a WebSocket topic, as returned by `members()`/presence frames. */
+export interface TopicMember {
+  /** Connection id assigned by `WSSMAN.register`. */
+  id: string;
+  /** Registration nickname, falling back to the identity's `nickname` and then `""`. */
+  nickname: string;
+  /** Identity id from the guard (`contextData.user`/`chatUser`/`principal`). */
+  userId?: string;
+}
+
+/** Topic presence event names emitted when `WssConfig.presence` is enabled. */
+export type TopicPresenceEvent = "join" | "leave";
+
+/**
+ * Automatic presence frame: `{ type, topic, member, members }`.
+ *
+ * `member` is the socket that joined or left; `members` is the topic's member
+ * list after the change (the joining socket included on `join`, the departed
+ * socket excluded on `leave`).
+ */
+export interface TopicPresenceFrame {
+  type: TopicPresenceEvent;
+  topic: string;
+  member: TopicMember;
+  members: TopicMember[];
+}
+
 /** Thrown by `subscribe()` when a topic already has `maxClients` members. */
 export class TopicCapacityError extends Error {
   constructor(public readonly topic: string) {
     super("Topic capacity reached");
     this.name = "TopicCapacityError";
   }
+}
+
+function normalizeHistoryLimit(limit: number | undefined): number {
+  if (limit === undefined) return DEFAULT_TOPIC_HISTORY_LIMIT;
+  return Number.isSafeInteger(limit) && limit > 0
+    ? limit
+    : DEFAULT_TOPIC_HISTORY_LIMIT;
 }
 
 export class subManager {
@@ -59,14 +111,26 @@ export class subManager {
   setTopicConfig(topic: string, config: WssConfig = {}): void {
     WSSMAN.setTopicConfig(topic, config);
   }
+  /** Typed member list for a topic; see {@link WssManager.members}. */
+  members(topic: string): TopicMember[] {
+    return WSSMAN.members(topic);
+  }
   /**
    * Publishes to unique topics and returns Bun's outcome for each topic.
+   *
+   * Pass `{ includeSelf: true }` to also deliver the frame to this socket
+   * (Bun's `publish()` otherwise excludes the publisher). The default is
+   * sender-exclusive, matching the historical behavior and result shape.
    *
    * `backpressured` is Bun-internal (a peer past the outbound drain threshold)
    * and cannot be produced from application code; see `TopicPublishResult`.
    */
-  broadcast(topics: string[], data: any): TopicPublishResult[] {
-    return WSSMAN.broadcastToTopics(this.ws, topics, data);
+  broadcast(
+    topics: string[],
+    data: any,
+    options?: TopicBroadcastOptions,
+  ): TopicPublishResult[] {
+    return WSSMAN.broadcastToTopics(this.ws, topics, data, options);
   }
 }
 
@@ -76,9 +140,10 @@ export class WssManager {
   private topicRegistry = new Map<string, Set<string>>(); // Map<Topic, Set<ConnectionId>>
   private memberTopics = new Map<string, Set<string>>(); // ID -> Set of Topics
   private roomAdmins = new Map<string, Set<string>>(); // Map<Topic, Set<ConnectionId>>
+  /** Last queued history write per topic; replay awaits it before reading. */
+  private historySaves = new Map<string, Promise<void>>();
 
   // This is the "Blueprint" for all random/temp rooms
-
   private defaultTopicConfig: WssConfig = {
     maxClients: Infinity,
     maxPayloadSize: 65536,
@@ -93,21 +158,45 @@ export class WssManager {
     return id;
   }
 
-  getMemberDetails(topic: string) {
-    const memberIds = this.topicRegistry.get(topic) || new Set();
-    const members = [];
+  /**
+   * Typed member list for a topic.
+   *
+   * Returns `{ id, nickname, userId? }` for every live connection subscribed
+   * to `topic`, in join order. `nickname` is the registration nickname (or the
+   * identity's nickname, or `""`); `userId` is the guard identity's id when it
+   * attached one (otherwise the property is absent).
+   */
+  members(topic: string): TopicMember[] {
+    const memberIds = this.topicRegistry.get(topic) || new Set<string>();
+    const members: TopicMember[] = [];
 
     for (const id of memberIds) {
-      const ws = this.connections.get(id);
-      if (ws) {
-        members.push({
-          id,
-          userId: ws.data.contextData?.chatUser?.id,
-          nickname: ws.data.nickname,
-        });
-      }
+      const member = this.memberDetails(id);
+      if (member) members.push(member);
     }
     return members;
+  }
+
+  /** @deprecated Use {@link members}; kept for existing call sites. */
+  getMemberDetails(topic: string): TopicMember[] {
+    return this.members(topic);
+  }
+
+  private memberDetails(id: string): TopicMember | undefined {
+    const ws = this.connections.get(id);
+    if (!ws) return undefined;
+
+    const data = (ws.data ?? {}) as Record<string, any>;
+    const identity = resolveSocketIdentity(data.contextData, data) as
+      | { id?: unknown; nickname?: unknown }
+      | undefined;
+    const nickname = String(data.nickname ?? identity?.nickname ?? "");
+    const userId =
+      typeof identity?.id === "string" ? identity.id : undefined;
+
+    return userId === undefined
+      ? { id, nickname }
+      : { id, nickname, userId };
   }
 
   /** Get all topics a specific user is currently in */
@@ -116,7 +205,7 @@ export class WssManager {
   }
 
   get(topic: string) {
-    return this.getMemberDetails(topic);
+    return this.members(topic);
   }
 
   unregister(id: string) {
@@ -142,6 +231,11 @@ export class WssManager {
     members.add(id);
     if (!this.memberTopics.has(id)) this.memberTopics.set(id, new Set());
     this.memberTopics.get(id)!.add(topic);
+
+    const member = this.memberDetails(id);
+    if (member) this.emitPresence(id, topic, "join", member);
+
+    this.scheduleHistoryReplay(id, topic, config.history);
   }
   isSubscribed(id: string, topic: string): boolean {
     return this.memberTopics.get(id)?.has(topic) ?? false;
@@ -149,9 +243,12 @@ export class WssManager {
 
   unsubscribe(id: string, topic: string): void {
     const ws = this.connections.get(id);
+    const members = this.topicRegistry.get(topic);
+    const wasSubscribed = members?.has(id) ?? false;
+    const departingMember = wasSubscribed ? this.memberDetails(id) : undefined;
+
     if (ws) ws.unsubscribe(topic);
 
-    const members = this.topicRegistry.get(topic);
     if (members) {
       members.delete(id);
 
@@ -175,6 +272,10 @@ export class WssManager {
     // Remove from reverse lookup
     this.memberTopics.get(id)?.delete(topic);
     if (this.memberTopics.get(id)?.size === 0) this.memberTopics.delete(id);
+
+    if (departingMember) {
+      this.emitPresence(id, topic, "leave", departingMember);
+    }
   }
 
   /** 3. Admin & Role Management */
@@ -225,6 +326,144 @@ export class WssManager {
     this.topicConfigs.set(topic, config);
   }
 
+  // --- Presence -------------------------------------------------------
+  private presenceFor(topic: string): { join: boolean; leave: boolean } {
+    const presence = this.getConfigForTopic(topic).presence;
+    if (!presence) return { join: false, leave: false };
+    if (presence === true) return { join: true, leave: true };
+    return {
+      join: presence.join !== false,
+      leave: presence.leave !== false,
+    };
+  }
+
+  /**
+   * Emits one presence frame when the topic opted in.
+   *
+   * Delivery works around Bun's sender-exclusive `publish()`: for a join the
+   * publishing socket is the new member, so it receives a direct copy after
+   * the fan-out. For a leave the publisher is a remaining member, which also
+   * needs the direct copy. Without presence config nothing is sent.
+   */
+  private emitPresence(
+    id: string,
+    topic: string,
+    type: TopicPresenceEvent,
+    member: TopicMember,
+  ): void {
+    if (!this.presenceFor(topic)[type]) return;
+
+    const members = this.members(topic);
+    if (type === "leave" && members.length === 0) return;
+
+    const frame: TopicPresenceFrame = { type, topic, member, members };
+    const payload = JSON.stringify(frame);
+
+    // Joins publish from the new member; leaves publish from a member that
+    // stays behind, so a closed departing socket never has to publish.
+    const publisherId = type === "join" ? id : members[0]?.id;
+    const publisher = publisherId
+      ? this.connections.get(publisherId)
+      : undefined;
+    if (!publisher) return;
+
+    try {
+      publisher.publish(topic, payload);
+    } catch {
+      return;
+    }
+    // Bun excludes the publishing socket; give it the frame explicitly.
+    try {
+      publisher.send(payload);
+    } catch {}
+  }
+
+  // --- History --------------------------------------------------------
+  private scheduleHistoryReplay(
+    id: string,
+    topic: string,
+    history: WssHistoryConfig | undefined,
+  ): void {
+    if (!history || history.replay === false) return;
+    void this.replayHistory(id, topic, history);
+  }
+
+  private async replayHistory(
+    id: string,
+    topic: string,
+    history: WssHistoryConfig,
+  ): Promise<void> {
+    const ws = this.connections.get(id);
+    if (!ws) return;
+
+    // Wait for every write queued before this join so a client that joins
+    // right after a broadcast still sees it.
+    const pending = this.historySaves.get(topic);
+    if (pending) await pending;
+    if (!this.isSubscribed(id, topic)) return;
+
+    let frames: unknown[];
+    try {
+      frames = await history.store.recent(
+        topic,
+        normalizeHistoryLimit(history.limit),
+      );
+    } catch (error) {
+      console.warn("[rossa] topic history replay failed", error);
+      return;
+    }
+
+    for (const frame of frames) {
+      const payload = typeof frame === "string" ? frame : JSON.stringify(frame);
+      if (payload === undefined) continue;
+      try {
+        ws.send(payload);
+      } catch {
+        return;
+      }
+    }
+  }
+
+  private persistHistoryFrame(topic: string, frame: unknown): void {
+    const history = this.getConfigForTopic(topic).history;
+    if (!history) return;
+
+    if (history.persist) {
+      let shouldPersist = false;
+      try {
+        shouldPersist = history.persist(frame);
+      } catch {
+        shouldPersist = false;
+      }
+      if (!shouldPersist) return;
+    }
+
+    const previous = this.historySaves.get(topic) ?? Promise.resolve();
+    const next = previous.then(
+      () => {
+        try {
+          return Promise.resolve(history.store.save(topic, frame));
+        } catch (error) {
+          console.warn("[rossa] topic history save failed", error);
+          return undefined;
+        }
+      },
+      () => undefined,
+    );
+    const settled = next.then(
+      () => undefined,
+      (error) => {
+        console.warn("[rossa] topic history save failed", error);
+      },
+    );
+
+    this.historySaves.set(topic, settled);
+    void settled.then(() => {
+      if (this.historySaves.get(topic) === settled)
+        this.historySaves.delete(topic);
+    });
+  }
+
   // ---  ---------------------------------------------------------------
   /** Broadcast to an array of topics */
   /**
@@ -236,18 +475,40 @@ export class WssManager {
    * `backpressured` is Bun-internal (a peer past the outbound drain threshold);
    * in-process app code cannot force it and no application branch or unit test
    * should depend on it.
+   *
+   * With `options.includeSelf`, the publishing socket also receives one copy
+   * (`ws.send`) before the fan-out, unless every topic rejects the payload as
+   * oversize. The returned `TopicPublishResult[]` describes the publish
+   * outcomes only and is unchanged by the option.
+   *
+   * When the topic config has `history`, accepted frames are queued for
+   * persistence in `broadcast()` order.
    */
   broadcastToTopics(
     ws: ServerWebSocket<any>,
     topics: string[],
     data: unknown,
+    options: TopicBroadcastOptions = {},
   ): TopicPublishResult[] {
     const payload = typeof data === "string" ? data : JSON.stringify(data);
     if (payload === undefined) return [];
     const payloadSize = new TextEncoder().encode(payload).byteLength;
+    const uniqueTopics = [...new Set(topics)];
     const results: TopicPublishResult[] = [];
 
-    for (const topic of new Set(topics)) {
+    if (options.includeSelf) {
+      const deliverable = uniqueTopics.some(
+        (topic) => !this.isPayloadTooLarge(topic, payloadSize),
+      );
+      const readyState = (ws as { readyState?: number }).readyState;
+      if (deliverable && (readyState === undefined || readyState === 1)) {
+        try {
+          ws.send(payload);
+        } catch {}
+      }
+    }
+
+    for (const topic of uniqueTopics) {
       // Security check: ensure we don't broadcast if payload exceeds config
       if (this.isPayloadTooLarge(topic, payloadSize)) {
         results.push({ topic, status: "oversize" });
@@ -260,6 +521,8 @@ export class WssManager {
         status:
           result === 0 ? "dropped" : result === -1 ? "backpressured" : "sent",
       });
+
+      this.persistHistoryFrame(topic, data);
     }
 
     return results;

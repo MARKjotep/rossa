@@ -3,14 +3,83 @@ import type { ctx } from "../http/ctx";
 import type { wssMessage } from "./config.wss";
 import type { subManager } from "./wss-manager";
 
+/**
+ * Data Bun keeps on a WebSocket connection after `WSSMAN.register` runs.
+ *
+ * `id` and `nickname` are added by registration, while `instance` and
+ * `contextData` come from the router's upgrade payload. `contextData` is the
+ * same object a guard populated as `ctx.data` before the handshake.
+ */
+export interface WssSocketData {
+  /** Connection id assigned by `WSSMAN.register`. */
+  id: string;
+  /** Display name passed to `WSSMAN.register` (usually the guard identity's nickname). */
+  nickname?: string;
+  /** Guard-populated `ctx.data` copied before the upgrade. */
+  contextData?: Record<string, any>;
+  /** Controller instance bound to this connection. */
+  instance?: Websocket<any, any>;
+}
+
+/**
+ * Resolves the guard-populated identity for a WebSocket connection.
+ *
+ * Lookup order: `contextData.user`, `contextData.chatUser` (the chat examples'
+ * key), `contextData.principal` (the transport smoketest's key), then
+ * `data.user`. The first defined value is returned; an empty object is used
+ * when no guard attached an identity.
+ */
+export function resolveSocketIdentity(
+  contextData?: Record<string, any>,
+  data?: Record<string, any>,
+): unknown {
+  const context = contextData ?? {};
+  return (
+    context.user ?? context.chatUser ?? context.principal ?? data?.user ?? {}
+  );
+}
+
+/** Reads a `nickname` string from a resolved identity, if it has one. */
+export function socketIdentityNickname(identity: unknown): string | undefined {
+  if (!identity || typeof identity !== "object") return undefined;
+  const nickname = (identity as { nickname?: unknown }).nickname;
+  return typeof nickname === "string" ? nickname : undefined;
+}
+
 // src/engines/framework/primitives/websocket.ts
-export class Websocket<T extends Record<string, any> = Record<string, any>> {
+/**
+ * Base class for WebSocket controllers.
+ *
+ * @typeParam TData - Per-connection state stored on `this.data`.
+ * @typeParam TIdentity - Guard-populated identity exposed as `this.user`
+ * (resolved from `contextData.user`, `contextData.chatUser`,
+ * `contextData.principal`, or `ws.data.user`). Defaults to
+ * `Record<string, any>`, so untyped use keeps working.
+ */
+export class Websocket<
+  TData extends Record<string, any> = Record<string, any>,
+  TIdentity = Record<string, any>,
+> {
   // We pass the native Bun `ws` instance so you can call ws.send() inside your methods
-  declare ws: ServerWebSocket<{}>;
+  declare ws: ServerWebSocket<WssSocketData>;
   declare public manager: subManager;
   /** Data populated by WebSocket route guards before the connection upgrades. */
   contextData: Record<string, any> = {};
-  data: T = {} as T;
+  data: TData = {} as TData;
+  /**
+   * Guard-populated identity resolved from the upgrade's `contextData`
+   * (`user`, `chatUser`, or `principal`) or `ws.data.user`. Empty object when
+   * no guard attached one. Available from `open()` onwards.
+   */
+  declare user: TIdentity;
+  /**
+   * Query string of the WebSocket handshake URL (for example
+   * `/chat?room=lobby` → `room=lobby`). Captured by the default
+   * {@link capacityTopics} implementation, so subclasses that override
+   * `capacityTopics` should call `super.capacityTopics(ctx)` to keep it
+   * populated.
+   */
+  query: URLSearchParams = new URLSearchParams();
   constructor() {}
 
   /**
@@ -26,11 +95,16 @@ export class Websocket<T extends Record<string, any> = Record<string, any>> {
    * handshake. In that case `subManager.subscribe()` still enforces
    * `maxClients` and throws `TopicCapacityError`.
    *
+   * The default implementation also snapshots `ctx.url.searchParams` into
+   * {@link query}; when you override it, call `super.capacityTopics(ctx)` if
+   * you rely on `this.query`.
+   *
    * Configure the topic's `maxClients` before the upgrade (module scope, a
    * guard, or `WSSMAN.setTopicConfig`) — `open()` has not run yet when this is
    * called.
    */
-  capacityTopics(_ctx: ctx): string[] {
+  capacityTopics(ctx: ctx): string[] {
+    this.query = new URLSearchParams(ctx.url.searchParams);
     return [];
   }
 

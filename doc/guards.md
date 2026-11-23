@@ -177,7 +177,7 @@ declared.
 | `session(service)` | Session lifecycle | Loads the session into `ctx.session`, runs downstream work, and persists or deletes session changes afterward. Accepts `{ auth, readonly }` and a typed data parameter. With no session cookie it creates an anonymous session. |
 | `requireSession(validator?)` | Verified session | Use after `session(service)`; continues only for a store-backed session — a validly signed cookie whose row exists and is not expired. Anonymous, forged, unknown-ID, and expired sessions get 401 "Authentication required" by default. An optional validator adds an identity check, e.g. `requireSession((s) => typeof (s as any).userId === "number")`. |
 | `authorize(check)` | Authorization | Runs a sync or async policy callback with `ctx`; returns 403 by default when it denies access. Use after authentication. |
-| `csrf(options?)` | CSRF token check | On POST, PUT, PATCH, and DELETE, compares a request header (default `x-csrf-token`) with the `csrf_token` cookie. The application must issue that cookie. |
+| `csrf(options?)` | CSRF token check | On POST, PUT, PATCH, and DELETE, compares a request token with the `csrf_token` cookie. Header mode (default) reads `x-csrf-token`; `{ mode: "double-submit" }` reads a JSON or form body field instead (default `csrf_token`). Issue the cookie with `csrf.issue(ctx)` or set it yourself. |
 
 ```ts
 import {
@@ -270,6 +270,63 @@ before persisting; when `MAX_COOKIE_SIZE` rejects the cookie it answers with a
 JSON `500` and does not write the row. **Behavior change:** before this, a row
 could be stored and the failure surfaced only after the handler, leaving an
 orphaned session.
+
+Replace login and logout data in one call:
+
+```ts
+await ctx.session!.reset({ userId: user.id, username: user.name }); // login
+await ctx.session!.clear(); // logout
+```
+
+`reset(data)` rotates first, then replaces the session data, updates `length`,
+and marks the session modified so the guard persists it; the old `sid` is no
+longer usable immediately. `clear()` removes every key and marks the session
+modified, so the guard deletes the row and expires the cookie. Both warn and
+return without changes on a readonly mount.
+
+### CSRF modes and token issuance
+
+`csrf()` guards unsafe methods only (POST, PUT, PATCH, DELETE). Header mode,
+the default, compares the request header (default `x-csrf-token`) with the
+`csrf_token` cookie and stays byte-compatible with 0.1.4.
+
+Double-submit mode reads the token from the body instead, which suits HTML
+forms and JSON clients that cannot set custom headers:
+
+```ts
+import { Methods, csrf, route, use, type ctx } from "rossa";
+
+@route("/lab/form")
+@use(csrf({ mode: "double-submit" })) // body field defaults to csrf_token
+class LabForm extends Methods {
+  async post({ res }: ctx) {
+    return res.json({ ok: true });
+  }
+}
+```
+
+A request is accepted only when the cookie token, the body token, and any
+supplied header token all agree. Multipart and URL-encoded bodies are parsed
+from a clone, so a downstream `urlencoded()` or `multipart()` guard can still
+read the body. Use `{ bodyField: "custom" }` to read another field.
+
+Mint the matching cookie with the guard helpers:
+
+```ts
+@route("/csrf")
+class CsrfToken extends Methods {
+  get(requestCtx: ctx) {
+    const { token } = csrf.issue(requestCtx); // also returns the serialized cookie
+    return requestCtx.res.json({ csrfToken: token });
+  }
+}
+```
+
+`csrf.issue(ctx, options?)` returns `{ token, cookie }`: a random UUID (or an
+explicit `value`), written through `res.setCookie` with a readable default
+(`Path=/`, `HttpOnly` off, `SameSite=Lax`, `Secure` derived from the request
+URL). `csrf.token(ctx)` returns just the token. Cookie flags and `cookieName`
+are customizable through the option object.
 
 ### JWT guards
 

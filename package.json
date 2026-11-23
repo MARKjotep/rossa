@@ -1,6 +1,6 @@
 {
   "name": "rossa",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A Bun and TypeScript web framework with routing, middleware guards, WebSockets, authentication, and database tools.",
   "author": "Marky <markjotep@gmail.com>",
   "license": "MIT",

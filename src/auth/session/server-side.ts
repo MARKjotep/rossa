@@ -51,7 +51,10 @@ export class ServerSide<
       get(target, prop: string | symbol) {
         // 1. Allow access to native class properties/methods first (e.g., .cookie(), .sid)
         if (prop in target) {
-          return Reflect.get(target, prop);
+          const value = Reflect.get(target, prop);
+          // Bind framework methods to the instance itself so their internal
+          // writes never re-enter the proxy's mutation traps.
+          return typeof value === "function" ? value.bind(target) : value;
         }
         // 2. Otherwise, fetch from the dynamic session data
         return target.data[prop as keyof TData];
@@ -165,5 +168,59 @@ export class ServerSide<
     }
 
     await this._rotator();
+  }
+
+  /**
+   * Rotates the session identifier and atomically replaces all session data.
+   *
+   * Use this after a successful login so no pre-authentication value survives:
+   *
+   * ```ts
+   * await ctx.session!.reset({ userId: user.id, username: user.name });
+   * ```
+   *
+   * The previous row is deleted and a fresh `sid` is issued, so the old cookie
+   * is no longer usable. The guard persists the new row and sends its cookie
+   * after the handler returns. Pass an empty object to end with no data (the
+   * guard then deletes the new row and expires the cookie).
+   *
+   * A readonly mount ignores the reset.
+   *
+   * @param data - Complete replacement for the session data.
+   */
+  public async reset(data: Partial<TData> = {}): Promise<void> {
+    if (this.isReadOnly) {
+      console.warn("session: readonly");
+      return;
+    }
+
+    await this.rotate();
+
+    this.data = { ...data } as TData;
+    this.length = Object.keys(this.data).length;
+    this.isNew = false;
+    this.isFound = true;
+    this.isModified = true;
+  }
+
+  /**
+   * Removes every key from the session.
+   *
+   * After the handler returns the guard deletes the stored row and expires the
+   * cookie, so the client is logged out. A readonly mount ignores the clear.
+   *
+   * ```ts
+   * await ctx.session!.clear();
+   * ```
+   */
+  public async clear(): Promise<void> {
+    if (this.isReadOnly) {
+      console.warn("session: readonly");
+      return;
+    }
+
+    this.data = {} as TData;
+    this.length = 0;
+    this.isModified = true;
   }
 }

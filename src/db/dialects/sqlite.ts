@@ -2,7 +2,7 @@ import { sql, type SQL } from "bun";
 import type { Column } from "../column";
 import type { DbDialectAdapter, TableStats } from "./dialect";
 import { quoteIdentifier, quoteTable, tableParts } from "../identifier";
-import type { DbSchema } from "../schema";
+import type { DbSchema, DbSchemaIndex } from "../schema";
 
 function tableFragment(schema: DbSchema<any>) {
   return sql.unsafe(quoteTable(schema.table));
@@ -56,17 +56,50 @@ function renderType(column: Column): string {
   }
 }
 
+function assertAutoIncrement(column: Column): void {
+  if (column.isAutoIncrement && !column.primaryKey) {
+    throw new Error(
+      "SQLite AUTOINCREMENT requires the column to be the primary key.",
+    );
+  }
+}
+
+function renderPrimaryKey(column: Column): string {
+  if (!column.primaryKey) return "";
+  return column.isAutoIncrement ? "PRIMARY KEY AUTOINCREMENT" : "PRIMARY KEY";
+}
+
 function renderColumn(name: string, column: Column): string {
+  assertAutoIncrement(column);
   return [
     quoteIdentifier(name),
     renderType(column),
-    column.primaryKey ? "PRIMARY KEY" : "",
+    renderPrimaryKey(column),
     column.required ? "NOT NULL" : "",
     column.isUnique ? "UNIQUE" : "",
     renderDefault(column).trim(),
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function createIndexSQL(table: string, index: DbSchemaIndex): string {
+  // SQLite takes the schema on the index name, not on the table name.
+  const [database, tableName] = tableParts(table);
+  const indexName = database
+    ? `${quoteIdentifier(database)}.${quoteIdentifier(index.name)}`
+    : quoteIdentifier(index.name);
+  return `CREATE ${index.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${indexName} ON ${quoteIdentifier(tableName)} (${index.columns
+    .map((column) => quoteIdentifier(column))
+    .join(", ")});`;
+}
+
+async function createIndex(
+  db: SQL,
+  schema: DbSchema<any>,
+  index: DbSchemaIndex,
+): Promise<void> {
+  await db`${sql.unsafe(createIndexSQL(schema.table, index))}`;
 }
 
 async function getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]> {
@@ -87,9 +120,10 @@ export const sqliteDialect: DbDialectAdapter = {
   },
   buildColumn: renderColumn,
   buildColumnType(column) {
+    assertAutoIncrement(column);
     return [
       renderType(column),
-      column.primaryKey ? "PRIMARY KEY" : "",
+      renderPrimaryKey(column),
       column.required ? "NOT NULL" : "",
       column.isUnique ? "UNIQUE" : "",
       renderDefault(column).trim(),
@@ -106,8 +140,12 @@ export const sqliteDialect: DbDialectAdapter = {
     return row.version;
   },
   async createTable(db, schema) {
-    await db`${sql.unsafe(schema.createSQL(this))}`;
+    for (const statement of schema.createStatements(this)) {
+      await db`${sql.unsafe(statement)}`;
+    }
   },
+  createIndexSQL,
+  createIndex,
   getColumns,
   async addColumn(db, schema, name, type) {
     if (/\bPRIMARY KEY\b|\bUNIQUE\b/i.test(type)) {
@@ -192,9 +230,22 @@ export const sqliteDialect: DbDialectAdapter = {
   async getTableIndices(db, schema) {
     const [database, table] = tableParts(schema.table);
     const pragmaDatabase = database ? `${quoteIdentifier(database)}.` : "";
-    return db`${sql.unsafe(
+    const indices = await db<Record<string, unknown>[]>`${sql.unsafe(
       `PRAGMA ${pragmaDatabase}index_list(${quoteIdentifier(table)})`,
     )}`;
+    const rows: Array<Record<string, unknown>> = [];
+    for (const index of indices) {
+      const info = await db<{ name: string | null }[]>`${sql.unsafe(
+        `PRAGMA ${pragmaDatabase}index_info(${quoteIdentifier(String(index.name))})`,
+      )}`;
+      rows.push({
+        ...index,
+        columns: info
+          .map((column) => column.name)
+          .filter((name): name is string => typeof name === "string"),
+      });
+    }
+    return rows;
   },
   async getTableSchema(db, schema) {
     const [database, table] = tableParts(schema.table);

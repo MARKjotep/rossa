@@ -4,6 +4,80 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-11-23
+
+### Fixed
+
+- MCP `origin` scheme wildcards: `origin: ["https://*"]` now allows any https
+  origin (and `"http://*"` any http origin) instead of matching nothing. Rossa
+  validates `http`/`https` wildcards itself before handing the request to the
+  MCP SDK, whose own wildcard rule honours only non-web schemes. Semantics:
+  `"https://*"` allows every https origin and rejects http, `"http://*"` is the
+  inverse, non-web wildcards such as `"moz-extension://*"` behave exactly as
+  before, exact origins stay exact (scheme/host/port), plain hostname entries
+  stay port-agnostic, missing `Origin` headers still pass, and omitting
+  `origin` still disables validation (B2).
+
+### Added
+
+**Database**
+
+- `DbRepository.findMany({ where?, orderBy?, limit? })` for typed, ordered,
+  limited reads without raw SQL. Columns and directions are validated against
+  the schema and bound as parameters.
+- Declarative secondary indexes: `new DbSchema(table, columns, dialect, {
+  indices: [{ name, columns, unique? }] })`, emitted idempotently by
+  `create()`/`createSQL()` for every dialect, with `indices`,
+  `createTableSQL()`, `createIndexSQLs()`, and `createStatements()`.
+- `Column.autoIncrement()` (with `Column.isAutoIncrement`) on `serial()`,
+  `int()`, and `bigint()` columns, rendered per dialect (`AUTOINCREMENT` on
+  SQLite primary keys, PostgreSQL identity, `AUTO_INCREMENT` for non-serial
+  MySQL columns).
+
+**Guards and sessions**
+
+- `csrf({ mode: "double-submit", bodyField? })`: compares a JSON or form body
+  token with the `csrf_token` cookie, still rejecting a supplied mismatched
+  header. Header mode is unchanged.
+- `csrf.issue(ctx, options?)` / `csrf.token(ctx)` mint a token, write the
+  matching cookie through `res.setCookie`, and return `{ token, cookie }`.
+- `session.reset(data)` rotates and replaces the stored data in one call;
+  `session.clear()` empties it so the guard deletes the row and expires the
+  cookie. Both are no-ops with a warning on readonly mounts.
+- `res.setCookie(name, value, options?)` and `res.clearCookie(name, options?)`:
+  direct `Set-Cookie` writes with per-call header preservation, reusing
+  `CookieOptions` and value sanitization.
+
+**WebSockets**
+
+- `broadcast(topics, data, { includeSelf: true })` also delivers the frame to
+  the publishing socket; the default stays sender-exclusive.
+- `WssConfig.presence` (`true` or `{ join?, leave? }`) emits automatic
+  `{ type, topic, member, members }` join/leave frames, and
+  `manager.members(topic)` returns a typed `TopicMember[]`.
+- `WssConfig.history` persists accepted frames through a `TopicHistoryStore`
+  and replays them oldest → newest on join, with `limit`, `replay`, and
+  `persist` controls (`DEFAULT_TOPIC_HISTORY_LIMIT` is `50`).
+- `Websocket<TData, TIdentity>` types the guard identity on `this.user` and the
+  handshake query on `this.query` (resolved by the default
+  `capacityTopics(ctx)`); `this.ws` is now `ServerWebSocket<WssSocketData>`.
+
+**Request**
+
+- `req.autoBody<T>(options?)`: content-type-aware, cached body selection
+  (`json` / `form` / `text` / `empty`), 1 MiB default cap, malformed JSON falls
+  back to raw text.
+
+### Changed
+
+- **`DbDialectAdapter` contract:** custom dialect implementations must now
+  provide `createIndexSQL(table, index)` and `createIndex(db, schema, index)`.
+  Adapters written against 0.1.4 no longer satisfy the interface.
+- Documentation covers the 0.1.5 surface, including typed WebSocket identity,
+  presence/history, cookie writes, CSRF modes, and the explicit `head()` pairing
+  for `res.fileServer()` asset controllers (the built-in `staticFiles()` guard
+  already answers GET and HEAD together).
+
 ## [0.1.4] - 2026-11-23
 
 ### ⚠️ Behavior change

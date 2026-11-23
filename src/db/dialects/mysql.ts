@@ -2,7 +2,7 @@ import { sql, type SQL } from "bun";
 import type { Column } from "../column";
 import type { DbDialectAdapter, DbDialectName, TableStats } from "./dialect";
 import { tableParts } from "../identifier";
-import type { DbSchema } from "../schema";
+import type { DbSchema, DbSchemaIndex } from "../schema";
 
 const quoteIdentifier = (name: string): string => {
   if (!name || name.includes("\0")) {
@@ -54,10 +54,16 @@ function renderDefault(column: Column): string {
   return ` DEFAULT ${column.defaultValue}`;
 }
 
+function renderAutoIncrement(column: Column): string {
+  // SERIAL already renders AUTO_INCREMENT; plain integers can opt in.
+  if (!column.isAutoIncrement || column.type === "serial") return "";
+  return " AUTO_INCREMENT";
+}
+
 function renderColumn(name: string, column: Column): string {
   return [
     quoteIdentifier(name),
-    renderType(column),
+    `${renderType(column)}${renderAutoIncrement(column)}`,
     column.primaryKey ? "PRIMARY KEY" : "",
     column.required ? "NOT NULL" : "",
     column.isUnique ? "UNIQUE" : "",
@@ -65,6 +71,30 @@ function renderColumn(name: string, column: Column): string {
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+/** MySQL has no `CREATE INDEX IF NOT EXISTS`; existence is checked instead. */
+function createIndexSQL(table: string, index: DbSchemaIndex): string {
+  return `CREATE ${index.unique ? "UNIQUE " : ""}INDEX ${quoteIdentifier(index.name)} ON ${quoteTable(table)} (${index.columns
+    .map((column) => quoteIdentifier(column))
+    .join(", ")});`;
+}
+
+async function createIndex(
+  db: SQL,
+  schema: DbSchema<any>,
+  index: DbSchemaIndex,
+): Promise<void> {
+  const [database, table] = tableParts(schema.table);
+  const existing = database
+    ? await db<
+        unknown[]
+      >`SELECT 1 FROM information_schema.statistics WHERE table_schema = ${database} AND table_name = ${table} AND index_name = ${index.name} LIMIT 1`
+    : await db<
+        unknown[]
+      >`SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ${table} AND index_name = ${index.name} LIMIT 1`;
+  if (existing.length > 0) return;
+  await db`${sql.unsafe(createIndexSQL(schema.table, index))}`;
 }
 
 async function getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]> {
@@ -90,7 +120,7 @@ function makeMysqlDialect(name: DbDialectName): DbDialectAdapter {
     buildColumn: renderColumn,
     buildColumnType(column) {
       return [
-        renderType(column),
+        `${renderType(column)}${renderAutoIncrement(column)}`,
         column.primaryKey ? "PRIMARY KEY" : "",
         column.required ? "NOT NULL" : "",
         column.isUnique ? "UNIQUE" : "",
@@ -113,8 +143,13 @@ function makeMysqlDialect(name: DbDialectName): DbDialectAdapter {
       return row.version;
     },
     async createTable(db, schema) {
-      await db`${sql.unsafe(schema.createSQL(this))}`;
+      await db`${sql.unsafe(schema.createTableSQL(this))}`;
+      for (const index of schema.indices) {
+        await createIndex(db, schema, index);
+      }
     },
+    createIndexSQL,
+    createIndex,
     getColumns,
     async addColumn(db, schema, name, type) {
       await db`${sql.unsafe(`ALTER TABLE ${quoteTable(schema.table)} ADD COLUMN ${quoteIdentifier(name)} ${type}`)}`;

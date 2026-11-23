@@ -19,9 +19,16 @@ export type McpServerFactory = (
 export interface McpOptions {
   /**
    * Allowed browser `Origin` values. Entries may be full origins
-   * (`https://app.example.com`), hostnames (`app.example.com`), or the SDK's
-   * extension form (`moz-extension://*`). Full origins are matched exactly
-   * (scheme, host, and port); hostnames are matched port-agnostically.
+   * (`https://app.example.com`), plain hostnames (`app.example.com`), or
+   * scheme wildcards (`https://*`, `http://*`, `moz-extension://*`). Full
+   * origins are matched exactly (scheme, host, and port); hostnames are
+   * matched port-agnostically, in either scheme.
+   *
+   * A scheme wildcard allows every origin that uses that scheme: `https://*`
+   * admits any https origin but not http, and `http://*` the reverse. Rossa
+   * matches the `http`/`https` forms itself because the underlying MCP SDK
+   * wildcard rule only covers non-web schemes; extension wildcards such as
+   * `moz-extension://*` are validated by the SDK as before.
    *
    * Requests without an `Origin` header always pass, as non-browser MCP
    * clients do not send one. When omitted, Origin validation is disabled;
@@ -50,20 +57,37 @@ export function createMcpControllerFactory(
 }
 
 interface OriginAllowlist {
+  /** Exact origins (scheme, host, port) matched by Rossa. */
   origins: Set<string>;
+  /** `http:` / `https:` scheme wildcards matched by Rossa. */
+  schemes: Set<string>;
+  /** Hostname rules handed to the SDK validator (plain hosts + non-web wildcards). */
   hostnames: string[];
 }
 
+/** Matches a bare scheme wildcard such as `https://*` or `moz-extension://*`. */
+const SCHEME_WILDCARD = /^([a-z][a-z0-9+.-]*):\/\/\*$/i;
+
 function compileOrigins(origin: string | string[]): OriginAllowlist {
-  const allowlist: OriginAllowlist = { origins: new Set(), hostnames: [] };
+  const allowlist: OriginAllowlist = {
+    origins: new Set(),
+    schemes: new Set(),
+    hostnames: [],
+  };
 
   for (const entry of Array.isArray(origin) ? origin : [origin]) {
     const value = entry.trim();
     if (!value) continue;
 
-    // `moz-extension://*` and similar scheme wildcards stay hostname-rule input.
-    if (/^[a-z][a-z0-9+.-]*:\/\/\*$/i.test(value)) {
-      allowlist.hostnames.push(value);
+    const wildcard = SCHEME_WILDCARD.exec(value);
+    if (wildcard) {
+      const scheme = `${wildcard[1]!.toLowerCase()}:`;
+      // SDK 2.4.0 ignores web-scheme wildcards, so Rossa honours them itself.
+      if (scheme === "http:" || scheme === "https:") {
+        allowlist.schemes.add(scheme);
+      } else {
+        allowlist.hostnames.push(value);
+      }
       continue;
     }
 
@@ -85,7 +109,9 @@ function validateOrigin(
   if (!originHeader) return undefined;
 
   try {
-    if (allowlist.origins.has(new URL(originHeader).origin)) return undefined;
+    const origin = new URL(originHeader);
+    if (allowlist.origins.has(origin.origin)) return undefined;
+    if (allowlist.schemes.has(origin.protocol)) return undefined;
   } catch {
     // Fall through to the SDK validator so malformed/opaque origins get a 403.
   }

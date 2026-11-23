@@ -5,8 +5,8 @@ export {
   UniqueConstraintError,
 } from "./errors";
 export { DbInspector } from "./inspector";
-export { DbRepository, type Where } from "./repository";
-export { DbSchema } from "./schema";
+export { DbRepository, type FindManyOptions, type Where } from "./repository";
+export { DbSchema, type DbSchemaIndex, type DbSchemaOptions } from "./schema";
 export { getDialect } from "./dialects/registry";
 export { postgresDialect } from "./dialects/postgres";
 export { sqliteDialect } from "./dialects/sqlite";

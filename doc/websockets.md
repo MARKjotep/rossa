@@ -96,8 +96,10 @@ parse each incoming frame as JSON:
 
 The server's `this.send = value` sends a string or byte buffer to the current
 client. `this.manager.broadcast(topics, value)` JSON-stringifies non-string
-values and publishes them to subscribers. There is no framework-level
-envelope, so the custom client should treat message shape as endpoint-specific.
+values and publishes them to subscribers; by default the publishing socket is
+excluded, as with Bun's `publish()`. Pass `{ includeSelf: true }` to deliver one
+copy to the sender as well. There is no framework-level envelope, so the custom
+client should treat message shape as endpoint-specific.
 
 Example controller contract:
 
@@ -184,6 +186,16 @@ reconnecting immediately.
 Topic membership, connection limits, and rate-limit counters are process-local.
 They do not synchronize across workers or hosts. Multi-instance applications
 need shared pub/sub and application-owned authorization and persistence.
+
+Two opt-in topic features add server-originated frames. With `presence` enabled,
+clients receive ordinary text frames shaped
+`{ "type": "join" | "leave", "topic": "…", "member": { … }, "members": [ … ] }`
+as members come and go. With `history` configured, a joining socket receives the
+topic's stored frames, oldest → newest, before later live traffic; Rossa sends
+each entry exactly as the application's store returned it and adds no `replay`
+marker. Both are off by default, and presence/replayed frames are never
+persisted. Clients should treat any unknown top-level `type` as
+application-defined and ignore it safely.
 
 ## Minimal browser client shape
 

@@ -1,6 +1,6 @@
 import type { SQL } from "bun";
 import type { Column } from "../column";
-import type { DbSchema } from "../schema";
+import type { DbSchema, DbSchemaIndex } from "../schema";
 
 export type DbDialectName = "sqlite" | "postgres" | "mysql" | "mariadb";
 
@@ -21,6 +21,10 @@ export interface DbDialectAdapter {
   normalizeOperator(operator: string): string;
   version(db: SQL): Promise<string>;
   createTable(db: SQL, schema: DbSchema<any>): Promise<void>;
+  /** Render an (ideally idempotent) `CREATE INDEX` statement for a schema index. */
+  createIndexSQL(table: string, index: DbSchemaIndex): string;
+  /** Apply one schema index, skipping it when it already exists. */
+  createIndex(db: SQL, schema: DbSchema<any>, index: DbSchemaIndex): Promise<void>;
   getColumns(db: SQL, schema: DbSchema<any>): Promise<string[]>;
   addColumn(db: SQL, schema: DbSchema<any>, name: string, type: string): Promise<void>;
   dropColumn(db: SQL, schema: DbSchema<any>, name: string): Promise<void>;
