@@ -445,6 +445,11 @@ declare class StaticFileServer {
     constructor(resolvedAssetRootPath: string, additionalExtensions?: string[]);
     isFile(path: string): boolean;
     /**
+     * Builds the cache validator headers shared by every served file and reports
+     * whether the client's `If-None-Match` already matches `etag`.
+     */
+    private validators;
+    /**
      * Serves the request from this server's root.
      *
      * @param lookupPath - Optional already-decoded path to resolve instead of the

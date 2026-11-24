@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "path";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import type { Req } from "../http/req";
 import type { Res } from "../http/res";
 
@@ -96,6 +96,25 @@ export class StaticFileServer {
   }
 
   /**
+   * Builds the cache validator headers shared by every served file and reports
+   * whether the client's `If-None-Match` already matches `etag`.
+   */
+  private validators(
+    req: Req,
+    etag: string,
+    mtimeMs?: number,
+  ): { headers: Record<string, string>; notModified: boolean } {
+    const headers: Record<string, string> = {
+      ETag: etag,
+      "Cache-Control": `public, max-age=${this.CACHE_TTL / 1000}, must-revalidate`,
+    };
+    if (mtimeMs !== undefined) {
+      headers["Last-Modified"] = new Date(mtimeMs).toUTCString();
+    }
+    return { headers, notModified: req.headers.get("If-None-Match") === etag };
+  }
+
+  /**
    * Serves the request from this server's root.
    *
    * @param lookupPath - Optional already-decoded path to resolve instead of the
@@ -182,14 +201,9 @@ export class StaticFileServer {
 
     // 3. EXECUTION DISPATCH MATRIX
     if (cached) {
-      const clientETag = req.headers.get("If-None-Match");
+      const { headers, notModified } = this.validators(req, cached.etag);
 
-      const headers = {
-        ETag: cached.etag,
-        "Cache-Control": `public, max-age=${this.CACHE_TTL / 1000}, must-revalidate`,
-      };
-
-      if (clientETag === cached.etag) {
+      if (notModified) {
         return new Response(null, { status: 304, headers });
       }
 
@@ -204,10 +218,19 @@ export class StaticFileServer {
       );
     }
 
-    // Fallback for large asset structures
+    // Fallback for large asset structures: stat metadata gives a weak validator
+    // without buffering the body in memory.
     const largeFilePointer = Bun.file(targetDiskLocation);
     if (await largeFilePointer.exists()) {
-      return res.file(largeFilePointer);
+      const { size, mtimeMs } = await stat(targetDiskLocation);
+      const etag = `W/"${Bun.hash(`${size}-${mtimeMs}`).toString(16)}"`;
+      const { headers, notModified } = this.validators(req, etag, mtimeMs);
+
+      if (notModified) {
+        return new Response(null, { status: 304, headers });
+      }
+
+      return res.file(largeFilePointer, undefined, headers);
     }
 
     return res.null(404);

@@ -4,6 +4,16 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Static files above the 50 KB cache threshold now send an `ETag`,
+  `Cache-Control: public, max-age=900, must-revalidate`, and `Last-Modified`
+  instead of no cache headers at all. The validator is derived from file size
+  and `mtimeMs` so large assets stay unbuffered, and a matching `If-None-Match`
+  returns `304` with the same headers.
+
 ## [0.1.5] - 2026-11-23
 
 ### Fixed
