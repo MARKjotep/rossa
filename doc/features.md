@@ -385,7 +385,7 @@ methods return a standard `Response`.
 | `redirect(url, status?)`   | Safe-by-default redirect to an origin-relative target; unsafe targets answer `400` (see below). |
 | `redirectLocal(url, status?)` | Alias of `redirect`, kept for `0.1.3` callers; same origin-relative validation.            |
 | `redirectExternal(url, status?)` | Redirect to an absolute `http:`/`https:` URL only; other targets answer `400`.          |
-| `file(file, meta?, headers?)` | Send a Bun file or `Uint8Array`. Bun files support byte ranges and return `416` for invalid ranges. |
+| `file(file, meta?, headers?)` | Send a Bun file or `Uint8Array`; `FileMeta` sets `size`, `type`, buffer `ranges`, and `etag`/`lastModified` validators. Bun files always support byte ranges; buffers opt in with `ranges: true`. |
 | `fileServer()`             | Serve the current request through the configured static file server.                          |
 
 #### Response cookies
@@ -454,6 +454,51 @@ return res.redirectExternal(
 CR/LF/NUL and other control characters are stripped from every `Location`
 value on the way out, so a redirect response can never inject additional
 headers.
+
+#### File responses
+
+`res.file(file, meta?, headers?)` sends a Bun file or a `Uint8Array`.
+
+- Bun files always support byte ranges. A `Uint8Array` opts in with
+  `meta.ranges: true`; without it buffers advertise `Accept-Ranges: none` and
+  ignore `Range`.
+- A satisfiable `Range` answers `206` with `Content-Range` and an exact
+  `Content-Length`. Slices are always identity-encoded: the response carries no
+  `Content-Encoding`, even when the full response would negotiate one. The
+  `bytes` unit is matched case-insensitively.
+- A comma-separated multi-range header such as `bytes=0-1,5-6` serves the first
+  satisfiable entry as a normal single-part `206`; Rossa never emits
+  `multipart/byteranges`. Entries that cannot be served are skipped, so `416`
+  is returned only when nothing in the header is satisfiable.
+- A `416` keeps `Content-Type`, `Accept-Ranges`, and
+  `Content-Range: bytes */<size>`.
+- A missing Bun file answers the framework JSON envelope
+  `{"success":false,"error":"File Not Found"}` with status `404`.
+- Full responses whose body depends on `Accept-Encoding` carry
+  `Vary: Accept-Encoding`; `206` slices are fixed and do not add it.
+
+`meta` fields:
+
+| Field          | Behavior                                                                                                       |
+| -------------- | -------------------------------------------------------------------------------------------------------------- |
+| `size`         | Byte length of a raw `Uint8Array`; honored only when it is a non-negative safe integer equal to the buffer's actual length. |
+| `type`         | MIME type of a raw `Uint8Array`; defaults to `application/octet-stream`.                                        |
+| `ranges`       | `true` enables byte ranges for a `Uint8Array` with the same single-range behavior as a Bun file.               |
+| `etag`         | Entity tag emitted as `ETag` and used for conditional requests.                                                 |
+| `lastModified` | Last modification time in epoch milliseconds, emitted as `Last-Modified`.                                       |
+
+Validators are opt-in, so omitting them leaves the response unchanged. When
+present they enable conditional GET:
+
+- `If-None-Match` (with `*`, comma-separated lists, and weak comparison) is
+  evaluated before range handling, so a match returns `304` even when the
+  request also asks for a byte range.
+- `If-Modified-Since` is honored only when `If-None-Match` cannot decide — the
+  header is absent or the file has no `etag` — so a failed ETag comparison is
+  not overridden by the date.
+- `If-Range` accepts an entity tag (weak comparison) or an HTTP date. A match
+  continues the `206`; a mismatch serves the full `200`; a validator the file
+  does not expose is ignored.
 
 For SSE, use the `res.event` helpers:
 
@@ -1307,12 +1352,26 @@ Serving behavior:
 - The resolved path must remain inside the client root, including after
   `realpath` symlink resolution. Escapes return `403`.
 - Missing files return `404`.
-- Files up to 50 KiB are cached in memory for 15 minutes and served with a weak
-  `ETag` and `Cache-Control: public, max-age=900, must-revalidate`.
-- A matching `If-None-Match` returns `304`.
-- Larger files are sent with `res.file()`.
-- `res.file()` sends Bun files with byte-range support; `Uint8Array` files do
-  not support ranges. Invalid ranges return `416`.
+- Files up to 50 KiB are buffered in an in-memory cache for 15 minutes and
+  served with a weak content-hash `ETag` and
+  `Cache-Control: public, max-age=900, must-revalidate`. Every request
+  revalidates the entry with one cheap size/mtime `stat`; when the file changed
+  on disk the entry is dropped and the bytes are re-read, so an edited asset is
+  served immediately with a new `ETag` instead of after the TTL.
+- Larger files are stat'd fresh on every request and sent through `res.file()`
+  with a weak `ETag`, `Last-Modified`, and the same `Cache-Control`, without
+  being buffered.
+- `If-None-Match` accepts `*` and comma-separated ETag lists under weak
+  comparison and answers `304` on both paths. Those `304` responses carry
+  `Vary: Accept-Encoding` when the app negotiates an encoding.
+- The large-file path keeps Bun-file byte-range support; cached small files are
+  raw buffers, advertise `Accept-Ranges: none`, and ignore `Range`. `res.file()`
+  supports ranges on a `Uint8Array` only with `meta.ranges: true`, and invalid
+  ranges return `416`. See [File responses](#file-responses).
+- `staticFiles({ root, dev: true })` bypasses the small-file cache entirely, so
+  every request reads fresh bytes. `dev` requires `root`; without it the mount
+  uses the app-wide server, whose shared cache cannot be opted out of here. The
+  TTL and the > 50 KiB always-fresh path are unchanged when `dev` is omitted.
 
 The cache is process-local and per-worker.
 

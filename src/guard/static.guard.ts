@@ -29,6 +29,17 @@ export interface StaticFilesOptions {
    * the app-wide `fileExtensions` configuration.
    */
   extensions?: string[];
+
+  /**
+   * Development flag: disables the ≤ 50 KB in-memory cache for this mount so
+   * edited assets are always fresh. Every request re-reads the file, so the
+   * body and its content-hash `ETag` always reflect the bytes on disk. Files
+   * above the 50 KB threshold already skip the cache, so the flag has no
+   * effect on them. Requires `root`: without it the mount uses the app-wide
+   * server, whose cache is shared by every mount and cannot be opted out of
+   * here.
+   */
+  dev?: boolean;
 }
 
 interface ScopedMount {
@@ -52,7 +63,9 @@ function getScopedMount(
 
   let mount = scopedMounts.get(options);
   if (!mount) {
-    const server = root ? new StaticFileServer(root, extensions) : undefined;
+    const server = root
+      ? new StaticFileServer(root, extensions, { dev: options.dev === true })
+      : undefined;
     const additional = new Set(extensions);
     mount = {
       server,
@@ -91,7 +104,7 @@ function matchesPrefix(pathname: string, prefix: string): boolean {
  * `staticFiles({ prefix: "/files", root: "./private-files" })` registered
  * behind an authentication guard.
  *
- * @param options - Optional prefix, root, and extension configuration.
+ * @param options - Optional prefix, root, extension, and development configuration.
  * @returns A guard factory that serves static assets before route handling.
  */
 export const staticFiles = createGuard<StaticFilesOptions>(

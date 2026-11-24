@@ -156,16 +156,147 @@ export function isLocalRedirectTarget(url: string): boolean {
   return normalizeLocalRedirectTarget(url) !== null;
 }
 
+/** A satisfiable byte range, with `end` already clamped to the representation. */
+interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * Parses an RFC 9110 `Range` header for a representation of `fileSize` bytes.
+ *
+ * The unit is matched case-insensitively and must be `bytes`. A comma-separated
+ * list is accepted; the first satisfiable entry is returned and every other
+ * entry is ignored (rossa does not implement `multipart/byteranges`). Returns
+ * `null` when the header is syntactically invalid or no entry is satisfiable.
+ */
+const parseByteRangeHeader = (
+  header: string,
+  fileSize: number,
+): ByteRange | null => {
+  const headerMatch = /^\s*([!#$%&'*+\-.^_`|~0-9A-Za-z]+)\s*=(.*)$/.exec(
+    header,
+  );
+  if (!headerMatch) return null;
+  if ((headerMatch[1] ?? "").toLowerCase() !== "bytes") return null;
+
+  for (const rawEntry of (headerMatch[2] ?? "").split(",")) {
+    const entry = rawEntry.trim();
+    if (entry === "") continue;
+
+    const entryMatch = /^(\d*)-(\d*)$/.exec(entry);
+    if (!entryMatch) continue;
+
+    const rawStart = entryMatch[1] ?? "";
+    const rawEnd = entryMatch[2] ?? "";
+    // `bytes=-` has neither a first nor a last position.
+    if (rawStart === "" && rawEnd === "") continue;
+
+    let start: number;
+    let end: number;
+
+    if (rawStart === "") {
+      // Suffix range: `bytes=-N` requests the final N bytes.
+      const suffixLength = Number(rawEnd);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) continue;
+      start = Math.max(fileSize - suffixLength, 0);
+      end = fileSize - 1;
+    } else {
+      start = Number(rawStart);
+      end = rawEnd === "" ? fileSize - 1 : Number(rawEnd);
+    }
+
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 0 ||
+      start > end ||
+      start >= fileSize
+    ) {
+      continue;
+    }
+
+    // RFC 9110: an end position beyond the representation is clamped to its last byte.
+    return { start, end: Math.min(end, fileSize - 1) };
+  }
+
+  return null;
+};
+
+/**
+ * Extracts the opaque quoted part of an entity tag, dropping any `W/` prefix so
+ * comparisons are weak (RFC 9110 `weak` comparison).
+ */
+const opaqueEtag = (value: string): string | null => {
+  const match = /^(?:W\/)?\s*(".*")\s*$/.exec(value.trim());
+  return match?.[1] ?? null;
+};
+
+/** Weakly compares two entity tags. */
+const weakEtagMatches = (candidate: string, current: string): boolean => {
+  const left = opaqueEtag(candidate);
+  const right = opaqueEtag(current);
+  return left !== null && left === right;
+};
+
+/** Whether an `If-None-Match` value matches the current representation. */
+const ifNoneMatchMatches = (header: string, currentEtag: string): boolean => {
+  const value = header.trim();
+  if (value === "*") return true;
+  return value
+    .split(",")
+    .some((entry) => weakEtagMatches(entry, currentEtag));
+};
+
+/**
+ * Evaluates `If-Range`: `true` means the requested range may be served, `false`
+ * means the full representation must be sent instead. When the validator the
+ * value refers to is unavailable, the range is allowed (the header is ignored).
+ */
+const ifRangeAllowsRange = (
+  value: string,
+  etag: string | undefined,
+  lastModified: number | undefined,
+): boolean => {
+  const trimmed = value.trim();
+  const looksLikeEtag = trimmed.startsWith('"') || trimmed.startsWith("W/");
+
+  if (!looksLikeEtag) {
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed) && lastModified !== undefined) {
+      return Math.floor(lastModified / 1000) <= Math.floor(parsed / 1000);
+    }
+  }
+
+  if (looksLikeEtag && etag !== undefined) {
+    return weakEtagMatches(trimmed, etag);
+  }
+
+  return true;
+};
+
 export interface RespoOptions {
   /** Compression encoding to apply to generated response bodies. */
   encoding?: ContentEncodingType;
 }
 
 export interface FileMeta {
-  /** Byte length of a raw `Uint8Array` file. */
-  size: number;
-  /** MIME type of a raw `Uint8Array` file. */
-  type: string;
+  /**
+   * Byte length of a raw `Uint8Array` body. Used only when it is a non-negative
+   * safe integer equal to the buffer's length; otherwise the real length wins.
+   */
+  size?: number;
+  /** MIME type of a raw `Uint8Array` body. */
+  type?: string;
+  /**
+   * Enables byte range requests for raw `Uint8Array` bodies. Bun files always
+   * support ranges.
+   */
+  ranges?: boolean;
+  /** Entity tag emitted as `ETag` and used for conditional requests. */
+  etag?: string;
+  /** Last modification time in epoch milliseconds, emitted as `Last-Modified`. */
+  lastModified?: number;
 }
 
 /** Builds HTTP responses while retaining status, headers, and encoding settings. */
@@ -174,6 +305,7 @@ export class res {
   private _headers: HeaderObject = {};
   private _cookies: string[] = [];
   private _encoding?: ContentEncodingType;
+  private _configuredEncoding?: ContentEncodingType;
 
   /**
    * Creates a response builder for the current request.
@@ -190,6 +322,7 @@ export class res {
     private readonly staticServer: StaticFileServer,
     private readonly server?: Bun.Server<undefined>,
   ) {
+    if (options.encoding) this._configuredEncoding = options.encoding;
     if (options.encoding) {
       this.encode(
         Compressor.negotiate(
@@ -198,6 +331,13 @@ export class res {
         ) ?? "none",
       );
     }
+  }
+
+  /**
+   * The encoding configured for this response (before per-request negotiation).
+   */
+  get configuredEncoding(): ContentEncodingType | undefined {
+    return this._configuredEncoding ?? this._encoding;
   }
 
   /**
@@ -586,15 +726,29 @@ export class res {
   }
 
   /**
-   * Universal file handler supporting BunFile and raw Uint8Array.
-   */
-  /**
    * Sends a Bun file or byte array, with optional metadata and extra headers.
-   * Bun files support byte range requests; byte arrays do not. A missing Bun
-   * file returns `404`, and an invalid range returns `416`.
+   *
+   * Bun files always support byte ranges; raw byte arrays do so only when
+   * `meta.ranges` is `true`. Range responses (`206`) are always sent
+   * uncompressed (identity) and carry no `Content-Encoding`, even when the
+   * response negotiated a compression encoding. The `Range` header may contain
+   * a comma-separated list, but rossa serves only the first satisfiable entry as
+   * a single `206` response; it does not implement `multipart/byteranges`. A
+   * `Range` header with no satisfiable entry (including any range against an
+   * empty representation) returns `416`.
+   *
+   * When `meta.etag`/`meta.lastModified` are supplied they are emitted as
+   * validators and evaluated for conditional GETs before any range handling:
+   * a matching `If-None-Match` (or `If-Modified-Since` without an
+   * `If-None-Match` decision) returns `304`. `If-Range` is honored against
+   * either validator; when the referenced validator is unavailable, `If-Range`
+   * is ignored and the range is served. When the response body depends on
+   * `Accept-Encoding`, full responses carry `Vary: Accept-Encoding`; `206`
+   * slices are fixed and do not add it. A missing Bun file returns a
+   * `404` JSON error envelope.
    *
    * @param file - File handle or bytes to send.
-   * @param meta - MIME type and size metadata for a byte array.
+   * @param meta - Type, size, range, and validator metadata.
    * @param extraHeaders - Additional headers to apply before sending.
    */
   async file(
@@ -608,106 +762,166 @@ export class res {
 
     // 1. Check if the BunFile actually exists on disk
     if (isBunFile && !(await (file as BunFile).exists())) {
-      return this.error(404, "File Not Found");
+      return this.error(404, { success: false, error: "File Not Found" });
     }
 
-    const fileSize = isBunFile ? file.size : (meta?.size ?? 0);
+    // B5: a caller-supplied buffer size is honored only when it matches the
+    // actual body, so a negative or stale value can never reach Content-Length.
+    const metaSize = meta?.size;
+    const fileSize = isBunFile
+      ? file.size
+      : typeof metaSize === "number" &&
+          Number.isSafeInteger(metaSize) &&
+          metaSize >= 0 &&
+          metaSize === file.length
+        ? metaSize
+        : file.length;
     const fileType = isBunFile
       ? file.type
       : (meta?.type ?? "application/octet-stream");
+
+    const supportsRanges = isBunFile || meta?.ranges === true;
 
     const baseHeaders = this._buildHeaders();
     if (!baseHeaders.has("Content-Type")) {
       baseHeaders.set("Content-Type", fileType);
     }
     if (!baseHeaders.has("Accept-Ranges")) {
-      baseHeaders.set("Accept-Ranges", isBunFile ? "bytes" : "none");
+      baseHeaders.set("Accept-Ranges", supportsRanges ? "bytes" : "none");
     }
 
-    const rangeHeader = isBunFile ? this.req.headers.get("range") : null;
-
-    // --- Standard Request ---
-    if (!rangeHeader) {
-      let body: BodyInit = file as BodyInit;
-      const finalHeaders = new Headers(baseHeaders);
-
-      if (this._encoding && this._encoding !== "none") {
-        try {
-          // 2. Safely await arrayBuffer to catch permission/read errors
-          const fileBuffer = isBunFile
-            ? new Uint8Array(await file.arrayBuffer())
-            : file;
-
-          const { payload, encoding: enc } = Compressor.handle(
-            fileBuffer,
-            this._encoding,
-          );
-
-          body = payload as BodyInit;
-          if (enc) finalHeaders.set("Content-Encoding", enc);
-          finalHeaders.set("Content-Length", payload.length.toString());
-        } catch (error) {
-          return this.error(500, "Error reading file");
-        }
-      } else {
-        finalHeaders.set("Content-Length", fileSize.toString());
-      }
-
-      return new Response(body, {
-        status: this._code,
-        headers: finalHeaders,
-      });
+    // F2: emit validators when the caller supplies them, never clobbering a
+    // header explicitly set through `res.header()`.
+    if (meta?.etag !== undefined && !baseHeaders.has("ETag")) {
+      baseHeaders.set("ETag", meta.etag);
+    }
+    if (meta?.lastModified !== undefined && !baseHeaders.has("Last-Modified")) {
+      baseHeaders.set("Last-Modified", new Date(meta.lastModified).toUTCString());
     }
 
-    // --- Range Request (BunFile only) ---
-    const rangeNotSatisfiable = () => {
-      const headers = this._buildHeaders();
-      headers.set("Content-Range", `bytes */${fileSize}`);
-      return new Response(null, { status: 416, headers });
-    };
+    const currentEtag = baseHeaders.get("ETag") ?? undefined;
+    const lastModified = meta?.lastModified;
 
-    const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
-    if (!rangeMatch) return rangeNotSatisfiable();
-
-    const rawStart = rangeMatch[1] ?? "";
-    const rawEnd = rangeMatch[2] ?? "";
-
-    let start: number;
-    let end: number;
-
-    if (rawStart === "") {
-      // Suffix range: `bytes=-N` requests the final N bytes.
-      const suffixLength = Number(rawEnd);
-      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
-        return rangeNotSatisfiable();
-      }
-      start = Math.max(fileSize - suffixLength, 0);
-      end = fileSize - 1;
-    } else {
-      start = Number(rawStart);
-      end = rawEnd === "" ? fileSize - 1 : Number(rawEnd);
-    }
-
+    // F2: conditional GETs are evaluated before range handling, so a matching
+    // validator wins even when the request also asks for a byte range.
+    const ifNoneMatch = this.req.headers.get("if-none-match");
     if (
-      !Number.isSafeInteger(start) ||
-      !Number.isSafeInteger(end) ||
-      start < 0 ||
-      start > end ||
-      start >= fileSize
+      ifNoneMatch !== null &&
+      currentEtag !== undefined &&
+      ifNoneMatchMatches(ifNoneMatch, currentEtag)
     ) {
-      return rangeNotSatisfiable();
+      return new Response(null, { status: 304, headers: baseHeaders });
     }
 
-    // RFC 9110: an end position beyond the representation is clamped to its last byte.
-    end = Math.min(end, fileSize - 1);
+    const ifModifiedSince = this.req.headers.get("if-modified-since");
+    const haveIfNoneMatchDecision =
+      ifNoneMatch !== null && currentEtag !== undefined;
+    if (
+      !haveIfNoneMatchDecision &&
+      ifModifiedSince !== null &&
+      lastModified !== undefined
+    ) {
+      const since = Date.parse(ifModifiedSince);
+      if (
+        Number.isFinite(since) &&
+        Math.floor(lastModified / 1000) <= Math.floor(since / 1000)
+      ) {
+        return new Response(null, { status: 304, headers: baseHeaders });
+      }
+    }
 
-    const rangeHeaders = new Headers(baseHeaders);
-    rangeHeaders.set("Content-Range", `bytes ${start}-${end}/${fileSize}`);
-    rangeHeaders.set("Content-Length", (end - start + 1).toString());
+    const rangeHeader = supportsRanges
+      ? this.req.headers.get("range")
+      : null;
 
-    return new Response((file as BunFile).slice(start, end + 1), {
-      status: 206,
-      headers: rangeHeaders,
+    if (rangeHeader !== null && rangeHeader.trim() !== "") {
+      const ifRange = this.req.headers.get("if-range");
+      const rangeAllowed =
+        ifRange === null ||
+        ifRangeAllowsRange(ifRange, currentEtag, lastModified);
+
+      if (rangeAllowed) {
+        const range = parseByteRangeHeader(rangeHeader, fileSize);
+
+        // B2/F5: the 416 reuses the representation headers prepared above so
+        // Content-Type, Accept-Ranges, and caller headers are preserved.
+        if (!range) {
+          const headers416 = new Headers(baseHeaders);
+          headers416.set("Content-Range", `bytes */${fileSize}`);
+          return new Response(null, { status: 416, headers: headers416 });
+        }
+
+        // B1: the slice is identity-encoded, so no Content-Encoding may be
+        // advertised even when the full response would have negotiated one.
+        const rangeHeaders = new Headers(baseHeaders);
+        rangeHeaders.delete("Content-Encoding");
+        rangeHeaders.set(
+          "Content-Range",
+          `bytes ${range.start}-${range.end}/${fileSize}`,
+        );
+        rangeHeaders.set(
+          "Content-Length",
+          (range.end - range.start + 1).toString(),
+        );
+
+        const body = isBunFile
+          ? (file as BunFile).slice(range.start, range.end + 1)
+          : (file as Uint8Array).slice(range.start, range.end + 1);
+
+        return new Response(body, {
+          status: 206,
+          headers: rangeHeaders,
+        });
+      }
+    }
+
+    // --- Standard Request (also the If-Range mismatch fallback) ---
+    let body: BodyInit = file as BodyInit;
+    const finalHeaders = new Headers(baseHeaders);
+
+    if (this._encoding && this._encoding !== "none") {
+      try {
+        // 2. Safely await arrayBuffer to catch permission/read errors
+        const fileBuffer = isBunFile
+          ? new Uint8Array(await (file as BunFile).arrayBuffer())
+          : (file as Uint8Array);
+
+        const { payload, encoding: enc } = Compressor.handle(
+          fileBuffer,
+          this._encoding,
+        );
+
+        body = payload as BodyInit;
+        if (enc) finalHeaders.set("Content-Encoding", enc);
+        else finalHeaders.delete("Content-Encoding");
+        finalHeaders.set("Content-Length", payload.length.toString());
+      } catch (error) {
+        return this.error(500, "Error reading file");
+      }
+    } else {
+      finalHeaders.set("Content-Length", fileSize.toString());
+    }
+
+    // B6: the full body depends on Accept-Encoding whenever compression is
+    // configured, even if negotiation chose identity for this request.
+    const negotiatedEncoding = this._configuredEncoding ?? this._encoding;
+    if (negotiatedEncoding && negotiatedEncoding !== "none") {
+      const vary = finalHeaders.get("Vary");
+      if (vary === null) {
+        finalHeaders.set("Vary", "Accept-Encoding");
+      } else if (
+        vary.trim() !== "*" &&
+        !vary
+          .split(",")
+          .some((item) => item.trim().toLowerCase() === "accept-encoding")
+      ) {
+        finalHeaders.set("Vary", `${vary}, Accept-Encoding`);
+      }
+    }
+
+    return new Response(body, {
+      status: this._code,
+      headers: finalHeaders,
     });
   }
 

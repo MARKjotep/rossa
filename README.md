@@ -171,15 +171,33 @@ Sessions accept the service or `{ auth, readonly }`, can be typed with
 
 ## Static files
 
-Rossa recognizes common web, image, font, text, and JSON extensions by default.
-Add extensions such as PDF or WebAssembly when creating the app:
+Rossa recognizes 24 common web extensions by default: HTML, CSS, JavaScript,
+JSX/TSX source, XML, common image formats, SVG, ICO, WOFF/WOFF2, TXT, and JSON.
+Add application-specific extensions once for the whole app:
 
 ```ts
 const app = new Rossa({ fileExtensions: [".pdf", "wasm"] });
 ```
 
-The `req.isFile` check recognizes these extensions. A catch-all route can then
-call `res.fileServer()` to serve from `clientPath`:
+Dotted and undotted forms normalize (`["mp4", ".webm"]` is equivalent to
+`[".mp4", ".webm"]`), matching is case-insensitive, and additions extend the
+built-in list instead of replacing it. `req.isFile` checks the composed list.
+
+**Media and binary assets are deliberately not in the default set.** Files such
+as `.mp4`, `.mp3`, `.webm`, `.ogg`, `.wav`, `.wasm`, `.pdf`, and `.m4a` 404
+through `req.isFile` until you add them — the "why does my video 404?" trap.
+
+`staticFiles({ prefix, root, extensions })` scopes a mount to a subtree, with a
+dedicated root, and extends the recognized extensions for that mount only:
+
+```ts
+app.use(
+  staticFiles({ prefix: "/media", root: "./media", extensions: [".mp4"] }),
+);
+```
+
+The guard serves GET and HEAD together, so it needs no `head()` pairing. A
+`res.fileServer()` catch-all does:
 
 ```ts
 @route("/:file")
@@ -188,14 +206,63 @@ class PublicFiles extends Methods {
     if (req.isFile) return res.fileServer();
     return res.null(404);
   }
+
+  // Dispatch is slot-exact, so HEAD reaches this method, not get().
+  // Mirror GET's status and headers with an empty body.
+  async head({ req, res }: ctx) {
+    if (!req.isFile) return res.null(404);
+    const response = await res.fileServer();
+    return new Response(null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
 }
 ```
 
 The static server checks resolved paths against the configured root (including
-symlink resolution), caches small files, and supports ETags. Pair `head()` with
-the `get()` above (same status and headers, empty body) if `curl -I` must answer
-`200`, or mount `staticFiles()` — the built-in guard serves GET and HEAD
-together. See [`doc/features.md`](doc/features.md#static-files).
+symlink resolution), caches small files, and supports ETags. Files up to 50 KiB
+stay in memory, but each request revalidates the cached entry with a cheap
+size/mtime `stat` and evicts it on mismatch, so an edited asset is visible right
+after the rewrite instead of after the 15-minute TTL. Larger files are stat'd
+fresh on every request and carry a weak `ETag`, `Last-Modified`, and
+`Cache-Control` without being buffered. `If-None-Match` accepts `*` and
+comma-separated ETag lists under weak comparison and answers `304`; those `304`
+responses carry `Vary: Accept-Encoding` when the app negotiates encoding. Pass
+`dev: true` (requires `root`) to disable the small-file cache entirely:
+
+```ts
+app.use(staticFiles({ root: "./public", dev: true }));
+```
+
+See [`doc/features.md`](doc/features.md#static-files).
+
+### Serving a single file
+
+`res.file(file, meta?, extraHeaders?)` sends a Bun file or a `Uint8Array`. Bun
+files support byte ranges: a satisfiable `Range` answers `206` with
+`Content-Range`. Range slices are always identity-encoded — no
+`Content-Encoding` — which keeps media seeking working through the negotiated
+encoder. The `bytes` unit is matched case-insensitively, and a multi-range
+header such as `bytes=0-1,5-6` serves the first satisfiable range as a normal
+single-part `206` (no `multipart/byteranges`) instead of answering `416`. A
+`416` keeps `Content-Type`, `Accept-Ranges`, and
+`Content-Range: bytes */<size>`.
+
+`FileMeta` accepts `ranges: true` to opt byte ranges in for a `Uint8Array` body
+(same single-range behavior as a Bun file); without it, buffers keep
+`Accept-Ranges: none`. `etag` and `lastModified` (milliseconds) are optional
+validators: when set, they are emitted and enable conditional GET.
+`If-None-Match` (`*`, lists, weak comparison) beats `Range` and returns `304`;
+`If-Modified-Since` is honored when no ETag matches; `If-Range` (entity-tag or
+HTTP-date form) serves the full `200` on mismatch, and unavailable validators
+are ignored. Validators are opt-in, so nothing changes when `meta` omits them.
+
+A missing BunFile answers the framework JSON envelope
+`{"success":false,"error":"File Not Found"}` (status `404`). Responses whose
+body depends on `Accept-Encoding` carry `Vary: Accept-Encoding`, and range
+responses never advertise `Content-Encoding`.
 
 ## WebSockets
 
@@ -340,6 +407,9 @@ and `DbSchemaIndex`; the WebSocket types `WssSocketData`, `TopicMember`,
 `AutoBodyResult`, and `CookieOptions`; and the CSRF types `CsrfOptions`,
 `CsrfIssueOptions`, and `CsrfIssuedToken`. See
 [`doc/features.md`](doc/features.md) for names.
+
+The 0.1.6 surface adds `StaticFilesOptions.dev` and the optional `res.file()`
+metadata fields `ranges`, `etag`, and `lastModified`.
 
 ## Documentation and examples
 
