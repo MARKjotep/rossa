@@ -437,20 +437,47 @@ interface StreamPayload {
 }
 type StreamPushFn = (prevFnResult?: any) => StreamPayload;
 
+/** Options accepted by {@link StaticFileServer}. */
+interface StaticFileServerOptions {
+    /**
+     * Development mode: disables the ≤ 50 KB in-memory cache so an edited asset
+     * is visible on the next request. Files above the threshold already bypass
+     * the cache, so the flag has no effect on them.
+     */
+    dev?: boolean;
+}
 declare class StaticFileServer {
     private readonly absoluteClientPath;
     private readonly additionalExtensions;
+    private readonly dev;
     private readonly SMALL_FILE_THRESHOLD;
     private readonly CACHE_TTL;
-    constructor(resolvedAssetRootPath: string, additionalExtensions?: string[]);
+    constructor(resolvedAssetRootPath: string, additionalExtensions?: string[], options?: StaticFileServerOptions);
     isFile(path: string): boolean;
     /**
      * Builds the cache validator headers shared by every served file and reports
-     * whether the client's `If-None-Match` already matches `etag`.
+     * whether the client's `If-None-Match` already matches `etag` under RFC 9110
+     * weak comparison (wildcard and comma-separated lists included).
      */
     private validators;
     /**
+     * Builds a bodyless `304 Not Modified` response for validators that still
+     * describe the client's copy. When the server negotiates a content encoding,
+     * the 304 advertises `Vary: Accept-Encoding` exactly like the equivalent
+     * `200`, so shared caches keep the negotiation dimension in their key.
+     */
+    private notModified;
+    /**
      * Serves the request from this server's root.
+     *
+     * Files at or below 50 KB are buffered and kept in an in-memory cache; files
+     * above it are streamed from disk on every request. Each cached entry is
+     * revalidated with one cheap `stat()` per request: when the file's
+     * modification time or size changed on disk, the entry is dropped and the
+     * bytes are read again, so an edited asset is served immediately with a new
+     * content-hash `ETag`. Entries also expire after the 15-minute TTL, as
+     * before. With the `dev` option the in-memory cache is bypassed entirely and
+     * every request reads fresh bytes.
      *
      * @param lookupPath - Optional already-decoded path to resolve instead of the
      * request pathname. Scoped mounts use it to serve a prefix-stripped path;
@@ -489,10 +516,22 @@ interface RespoOptions {
     encoding?: ContentEncodingType;
 }
 interface FileMeta {
-    /** Byte length of a raw `Uint8Array` file. */
-    size: number;
-    /** MIME type of a raw `Uint8Array` file. */
-    type: string;
+    /**
+     * Byte length of a raw `Uint8Array` body. Used only when it is a non-negative
+     * safe integer equal to the buffer's length; otherwise the real length wins.
+     */
+    size?: number;
+    /** MIME type of a raw `Uint8Array` body. */
+    type?: string;
+    /**
+     * Enables byte range requests for raw `Uint8Array` bodies. Bun files always
+     * support ranges.
+     */
+    ranges?: boolean;
+    /** Entity tag emitted as `ETag` and used for conditional requests. */
+    etag?: string;
+    /** Last modification time in epoch milliseconds, emitted as `Last-Modified`. */
+    lastModified?: number;
 }
 /** Builds HTTP responses while retaining status, headers, and encoding settings. */
 declare class res {
@@ -503,6 +542,7 @@ declare class res {
     private _headers;
     private _cookies;
     private _encoding?;
+    private _configuredEncoding?;
     /**
      * Creates a response builder for the current request.
      *
@@ -513,6 +553,10 @@ declare class res {
      * Bun's request timeout for the long-lived connection.
      */
     constructor(options: RespoOptions | undefined, req: req, staticServer: StaticFileServer, server?: Bun.Server<undefined> | undefined);
+    /**
+     * The encoding configured for this response (before per-request negotiation).
+     */
+    get configuredEncoding(): ContentEncodingType | undefined;
     /**
      * Sets the HTTP response status code.
      * * ### 1xx: Informational
@@ -740,15 +784,29 @@ declare class res {
     /** Serves the current request through the configured secure static file server. */
     fileServer(): Promise<Response>;
     /**
-     * Universal file handler supporting BunFile and raw Uint8Array.
-     */
-    /**
      * Sends a Bun file or byte array, with optional metadata and extra headers.
-     * Bun files support byte range requests; byte arrays do not. A missing Bun
-     * file returns `404`, and an invalid range returns `416`.
+     *
+     * Bun files always support byte ranges; raw byte arrays do so only when
+     * `meta.ranges` is `true`. Range responses (`206`) are always sent
+     * uncompressed (identity) and carry no `Content-Encoding`, even when the
+     * response negotiated a compression encoding. The `Range` header may contain
+     * a comma-separated list, but rossa serves only the first satisfiable entry as
+     * a single `206` response; it does not implement `multipart/byteranges`. A
+     * `Range` header with no satisfiable entry (including any range against an
+     * empty representation) returns `416`.
+     *
+     * When `meta.etag`/`meta.lastModified` are supplied they are emitted as
+     * validators and evaluated for conditional GETs before any range handling:
+     * a matching `If-None-Match` (or `If-Modified-Since` without an
+     * `If-None-Match` decision) returns `304`. `If-Range` is honored against
+     * either validator; when the referenced validator is unavailable, `If-Range`
+     * is ignored and the range is served. When the response body depends on
+     * `Accept-Encoding`, full responses carry `Vary: Accept-Encoding`; `206`
+     * slices are fixed and do not add it. A missing Bun file returns a
+     * `404` JSON error envelope.
      *
      * @param file - File handle or bytes to send.
-     * @param meta - MIME type and size metadata for a byte array.
+     * @param meta - Type, size, range, and validator metadata.
      * @param extraHeaders - Additional headers to apply before sending.
      */
     file(file: BunFile | Uint8Array, meta?: FileMeta, extraHeaders?: Heder | HeaderObject): Promise<Response>;
@@ -3040,6 +3098,16 @@ interface StaticFilesOptions {
      * the app-wide `fileExtensions` configuration.
      */
     extensions?: string[];
+    /**
+     * Development flag: disables the ≤ 50 KB in-memory cache for this mount so
+     * edited assets are always fresh. Every request re-reads the file, so the
+     * body and its content-hash `ETag` always reflect the bytes on disk. Files
+     * above the 50 KB threshold already skip the cache, so the flag has no
+     * effect on them. Requires `root`: without it the mount uses the app-wide
+     * server, whose cache is shared by every mount and cannot be opted out of
+     * here.
+     */
+    dev?: boolean;
 }
 /**
  * Serves requests for file-like paths through a static file server.
@@ -3052,7 +3120,7 @@ interface StaticFilesOptions {
  * `staticFiles({ prefix: "/files", root: "./private-files" })` registered
  * behind an authentication guard.
  *
- * @param options - Optional prefix, root, and extension configuration.
+ * @param options - Optional prefix, root, extension, and development configuration.
  * @returns A guard factory that serves static assets before route handling.
  */
 declare const staticFiles: (options?: StaticFilesOptions | undefined, overrideConfig?: BaseConfig) => GuardReturnType;

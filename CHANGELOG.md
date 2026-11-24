@@ -4,15 +4,57 @@ Notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-11-25
 
 ### Fixed
 
-- Static files above the 50 KB cache threshold now send an `ETag`,
+- Static files above the 50 KB threshold now send an `ETag`,
   `Cache-Control: public, max-age=900, must-revalidate`, and `Last-Modified`
   instead of no cache headers at all. The validator is derived from file size
   and `mtimeMs` so large assets stay unbuffered, and a matching `If-None-Match`
   returns `304` with the same headers.
+- Range responses no longer advertise a `Content-Encoding`: `206` slices are
+  sent identity-encoded, so seeking a compressed media file no longer yields
+  undecodable bytes (B1).
+- `416 Range Not Satisfiable` responses keep `Content-Type`, `Accept-Ranges`,
+  and `Content-Range: bytes */<size>` instead of dropping the file headers (B2).
+- A satisfiable multi-range header such as `bytes=0-1,5-6` serves the first
+  satisfiable range as a normal single-part `206`; it no longer answers `416`
+  while a range could be served (B3).
+- Range units are matched case-insensitively, so `Bytes=0-1` is honored (B4).
+- `res.file()` with a `Uint8Array` body defaults `Content-Length` to the actual
+  byte length and ignores bogus or negative `meta.size` values (B5).
+- File responses whose body depends on `Accept-Encoding` carry
+  `Vary: Accept-Encoding`, including static `304` responses, so shared caches
+  cannot reuse a compressed variant for an identity client (B6).
+- The small-file cache revalidates each request with a size/mtime `stat` and
+  evicts on mismatch, so an edited asset is served immediately after the
+  rewrite instead of after up to 15 minutes (B7).
+- `If-None-Match` accepts `*` and comma-separated ETag lists under weak
+  comparison, matching HTTP validator rules instead of requiring an exact
+  string (B8).
+
+### Added
+
+- `If-Range` support for `res.file()` range requests: a matching entity-tag
+  (weak comparison) or HTTP-date continues the `206`; a mismatch serves the full
+  `200`, and validators unavailable on the file are ignored (F1).
+- Optional `FileMeta.etag` and `FileMeta.lastModified` validators enable
+  conditional GET for `res.file()`: `If-None-Match` (`*`, lists, weak
+  comparison) beats `Range` and returns `304`, and `If-Modified-Since` is
+  honored when no ETag matches. Omitting them leaves responses unchanged (F2).
+- Multi-range requests are specified as first-satisfiable single-part `206`
+  responses; the server never emits `multipart/byteranges` (F3).
+- `FileMeta.ranges: true` opts `Uint8Array` bodies into byte ranges with the
+  same single-range behavior as Bun files; without it buffers keep
+  `Accept-Ranges: none` (F4).
+- A missing BunFile in `res.file()` answers the framework JSON envelope
+  `{"success":false,"error":"File Not Found"}` with status `404` instead of
+  plain text (F5).
+- `staticFiles({ root, dev: true })` disables the small-file cache entirely for
+  install-time asset editing and requires `root`. The TTL, the > 50 KB
+  always-fresh path, and the cache-on default are unchanged when `dev` is
+  omitted (F6).
 
 ## [0.1.5] - 2026-11-23
 
